@@ -25,16 +25,29 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
-AWS_PROFILE = "spendsense"
-AWS_REGION = "ap-south-1"
-S3_BUCKET = "spendsense-invoices-megh-2026"
+AWS_PROFILE = os.getenv("AWS_PROFILE", "spendsense")
+AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
+S3_BUCKET = os.getenv(
+    "S3_BUCKET",
+    "spendsense-invoices-megh-2026"
+)
 API_URL = "https://8ngwlz4334.execute-api.ap-south-1.amazonaws.com/expenses"
 
-# Use the AWS CLI profile already configured on your PC.
-aws_session = boto3.Session(
-    profile_name=AWS_PROFILE,
-    region_name=AWS_REGION
-)
+# Local development:
+# Use the existing "spendsense" AWS profile.
+#
+# Cloud deployment:
+# Set AWS_PROFILE to an empty value so boto3
+# uses the deployment environment credentials.
+if AWS_PROFILE:
+    aws_session = boto3.Session(
+        profile_name=AWS_PROFILE,
+        region_name=AWS_REGION
+    )
+else:
+    aws_session = boto3.Session(
+        region_name=AWS_REGION
+    )
 
 s3 = aws_session.client(
     "s3",
