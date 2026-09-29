@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Processing · SpendSense{% endblock %}
+{% block content %}
+<section class="page-head"><div><h1>Invoice Processing</h1><p>We've received <strong>{{ filename }}</strong>.</p></div></section>
+<div class="processing panel">
+  <div class="steps">
+    <div class="step done"><b>✓</b><div><strong>Uploading to Amazon S3</strong><span>Completed</span></div></div>
+    <div class="step done"><b>✓</b><div><strong>Extracting text with Textract</strong><span>Completed</span></div></div>
+    <div class="step done"><b>✓</b><div><strong>Processing with AWS Lambda</strong><span>Completed</span></div></div>
+    <div class="step done"><b>✓</b><div><strong>Saving to DynamoDB</strong><span>Completed</span></div></div>
+  </div>
+  <div class="complete">✓<h2>Processing Complete!</h2><p>Your invoice has been successfully processed.</p><a class="btn primary" href="{{ url_for('invoice_detail', index=0) }}">View Invoice Details</a></div>
+</div>
+{% endblock %}

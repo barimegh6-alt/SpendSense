@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+
+{% block title %}Analytics · SpendSense{% endblock %}
+
+{% block content %}
+
+<section class="page-head">
+    <div>
+        <h1>Spending Analytics</h1>
+        <p>Understand where your money is going.</p>
+    </div>
+
+    <span class="select">Last 6 Months ▾</span>
+</section>
+
+
+<!-- AWS CONNECTION STATUS -->
+<div class="panel" style="margin-bottom: 24px;">
+    <div class="panel-title">
+        <h2>Cloud Data Status</h2>
+        <span class="select">AWS Connected ✓</span>
+    </div>
+
+    <div style="padding: 18px;">
+        <p style="margin: 0 0 8px;">
+            Analytics data is connected to the SpendSense cloud pipeline:
+        </p>
+
+        <p style="margin: 0;">
+            <strong>S3 → Lambda → DynamoDB → API Gateway</strong>
+        </p>
+
+        {% if aws_expenses %}
+            <p style="margin: 12px 0 0;">
+                <strong>{{ aws_expenses|length }}</strong>
+                processed invoice record(s) are available from AWS.
+            </p>
+        {% else %}
+            <p style="margin: 12px 0 0;">
+                No processed AWS invoice records are currently available.
+            </p>
+        {% endif %}
+    </div>
+</div>
+
+
+<!-- ANALYTICS -->
+<div class="grid-2">
+
+    <div class="panel">
+        <div class="panel-title">
+            <h2>Monthly Expenses</h2>
+        </div>
+
+        <div class="line-chart">
+            <div class="line"></div>
+
+            <div class="chart-labels">
+                <span>Jan</span>
+                <span>Feb</span>
+                <span>Mar</span>
+                <span>Apr</span>
+                <span>May</span>
+                <span>Jun</span>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="panel">
+        <div class="panel-title">
+            <h2>Category Breakdown</h2>
+        </div>
+
+        <div class="category-list">
+
+            {% if categories %}
+
+                {% for cat, value in categories.items() %}
+
+                <div>
+                    <span>{{ cat }}</span>
+
+                    <b>
+                        ₹{{ "{:,.0f}".format(value) }}
+                    </b>
+                </div>
+
+                {% endfor %}
+
+            {% else %}
+
+                <div>
+                    <span>No category data available</span>
+                    <b>₹0</b>
+                </div>
+
+            {% endif %}
+
+        </div>
+    </div>
+
+</div>
+
+
+<!-- SPENDING INSIGHTS -->
+<div class="panel insights">
+
+    <h2>Spending Insights</h2>
+
+    <div class="insight">
+        📈 Your spending increased by 12.4% compared to last month.
+    </div>
+
+    <div class="insight">
+        🍔 Food & Dining is your largest expense category.
+    </div>
+
+    <div class="insight">
+        🧾 You have processed
+        <strong>{{ transactions|length }}</strong>
+        invoices in the current dataset.
+    </div>
+
+    <div class="insight">
+        ☁️ AWS currently has
+        <strong>{{ aws_expenses|length }}</strong>
+        processed invoice record(s).
+    </div>
+
+</div>
+
+{% endblock %}

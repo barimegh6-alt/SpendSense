@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Settings · SpendSense{% endblock %}
+{% block content %}
+<section class="page-head"><div><h1>Settings</h1><p>Manage your SpendSense preferences.</p></div></section>
+<form class="panel settings-panel" method="post" action="/settings">
+  <div class="setting-row">
+    <div><strong>Profile name</strong><span>Shown in your dashboard greeting.</span></div>
+    <input class="settings-input" name="name" value="{{ settings.name }}" required>
+  </div>
+  <div class="setting-row">
+    <div><strong>Currency</strong><span>Currency used for expense totals.</span></div>
+    <select class="settings-input" name="currency">
+      <option {% if settings.currency == "INR (₹)" %}selected{% endif %}>INR (₹)</option>
+      <option {% if settings.currency == "USD ($)" %}selected{% endif %}>USD ($)</option>
+      <option {% if settings.currency == "EUR (€)" %}selected{% endif %}>EUR (€)</option>
+    </select>
+  </div>
+  <div class="setting-row">
+    <div><strong>Expense notifications</strong><span>Receive processing and insight notifications.</span></div>
+    <label class="switch"><input type="checkbox" name="notifications" {% if settings.notifications %}checked{% endif %}><span></span></label>
+  </div>
+  <div class="save-row"><button class="btn primary" type="submit">Save Changes</button></div>
+</form>
+{% endblock %}

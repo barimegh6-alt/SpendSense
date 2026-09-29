@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Invoice · SpendSense{% endblock %}
+
+{% block content %}
+
+<section class="page-head">
+    <div>
+        <h1>Upload Invoice</h1>
+        <p>
+            Upload a bill or invoice and let SpendSense process it.
+        </p>
+    </div>
+</section>
+
+
+<div class="upload-panel">
+
+    <form
+        method="POST"
+        action="/upload"
+        enctype="multipart/form-data"
+        id="invoiceForm"
+    >
+
+        <div class="dropzone">
+
+            <div class="upload-icon">
+                ↥
+            </div>
+
+            <h2>
+                Upload your invoice
+            </h2>
+
+            <p>
+                Select an invoice from your computer.
+            </p>
+
+            <small>
+                Supports JPG, JPEG, PNG and PDF
+            </small>
+
+
+            <!-- Hidden file input -->
+            <input
+                id="invoice"
+                type="file"
+                name="invoice"
+                accept=".jpg,.jpeg,.png,.pdf"
+                required
+            >
+
+
+            <!-- Choose file -->
+            <label
+                for="invoice"
+                class="btn primary"
+            >
+                Choose File
+            </label>
+
+
+            <!-- Selected file name -->
+            <div
+                id="fileName"
+                style="
+                    margin-top:18px;
+                    font-size:12px;
+                    color:#5d50e8;
+                    font-weight:600;
+                "
+            >
+            </div>
+
+
+            <!-- REAL SUBMIT BUTTON -->
+            <button
+                type="submit"
+                class="btn primary"
+                id="uploadButton"
+                style="
+                    margin-top:18px;
+                    display:none;
+                "
+            >
+                Upload & Process Invoice
+            </button>
+
+        </div>
+
+
+        <div class="or">
+            OR
+        </div>
+
+
+        <div class="secondary-actions">
+
+            <button
+                type="button"
+                class="btn ghost"
+                onclick="document.getElementById('camera').click()"
+            >
+                ▣ Take a Photo
+            </button>
+
+            <button
+                type="button"
+                class="btn ghost"
+                onclick="alert('Google Drive integration will be added in a later cloud-integration phase.')"
+            >
+                ☁ Upload from Drive
+            </button>
+
+        </div>
+
+
+        <!-- Camera input -->
+        <input
+            id="camera"
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style="display:none"
+        >
+
+    </form>
+
+</div>
+
+
+<script>
+
+const invoiceInput =
+    document.getElementById("invoice");
+
+const cameraInput =
+    document.getElementById("camera");
+
+const fileName =
+    document.getElementById("fileName");
+
+const uploadButton =
+    document.getElementById("uploadButton");
+
+
+function showSelectedFile(file) {
+
+    if (!file) {
+        return;
+    }
+
+    fileName.textContent =
+        "Selected: " + file.name;
+
+    uploadButton.style.display =
+        "inline-block";
+}
+
+
+invoiceInput.addEventListener(
+    "change",
+    function () {
+
+        showSelectedFile(
+            this.files[0]
+        );
+
+    }
+);
+
+
+cameraInput.addEventListener(
+    "change",
+    function () {
+
+        if (this.files.length === 0) {
+            return;
+        }
+
+        // Copy the camera-selected file
+        // into the main invoice input
+        const dataTransfer =
+            new DataTransfer();
+
+        dataTransfer.items.add(
+            this.files[0]
+        );
+
+        invoiceInput.files =
+            dataTransfer.files;
+
+        showSelectedFile(
+            this.files[0]
+        );
+
+    }
+);
+
+
+document
+    .getElementById("invoiceForm")
+    .addEventListener(
+        "submit",
+        function () {
+
+            uploadButton.disabled =
+                true;
+
+            uploadButton.textContent =
+                "Uploading...";
+
+        }
+    );
+
+</script>
+
+{% endblock %}

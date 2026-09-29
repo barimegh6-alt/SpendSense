@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Invoice Details · SpendSense{% endblock %}
+{% block content %}
+<section class="page-head"><div><a class="back" href="{{ url_for('invoices') }}">← Back to Invoices</a><h1>Invoice Analysis</h1></div></section>
+<div class="detail-grid">
+  <div class="invoice-preview"><div class="fake-invoice"><div class="invoice-logo">THE URBAN CAFE</div><p>Invoice No: 1045</p><p>Date: {{ invoice.date }}</p><hr><p>Items</p><p>Paneer Tikka ........ ₹480</p><p>Pasta Alfredo ....... ₹340</p><p>Iced Tea ............ ₹240</p><hr><strong>Total ........ ₹{{ "{:,.2f}".format(invoice.amount) }}</strong></div></div>
+  <div class="panel extracted"><h2>Extracted Information</h2>
+    <div class="field"><span>Merchant</span><b>{{ invoice.merchant }}</b></div>
+    <div class="field"><span>Date</span><b>{{ invoice.date }}</b></div>
+    <div class="field"><span>Total Amount</span><b>₹{{ "{:,.2f}".format(invoice.amount) }}</b></div>
+    <div class="field"><span>Category</span><b class="tag">{{ invoice.category }}</b></div>
+    <div class="field"><span>Payment Method</span><b>Card</b></div>
+    <div class="field"><span>Status</span><b class="status">● Processed</b></div>
+  </div>
+</div>
+{% endblock %}

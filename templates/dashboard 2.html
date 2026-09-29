@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · SpendSense{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Good morning, Ananya! 👋</h1>
+    <p>Here's your expense overview.</p>
+  </div>
+  <a class="btn primary" href="{{ url_for('upload_invoice') }}">+ Upload Invoice</a>
+</section>
+
+<section class="cards">
+  <div class="stat-card"><div class="stat-icon green">₹</div><div><span>Total Expenses</span><strong>₹{{ "{:,.0f}".format(total) }}</strong><small class="up">↑ 12.4% from last month</small></div></div>
+  <div class="stat-card"><div class="stat-icon purple">▣</div><div><span>Invoices Processed</span><strong>{{ invoice_count }}</strong><small class="up">↑ 20% from last month</small></div></div>
+  <div class="stat-card"><div class="stat-icon orange">₹</div><div><span>Avg. Transaction</span><strong>₹{{ "{:,.0f}".format(total / invoice_count) }}</strong><small class="down">↓ 5.2% from last month</small></div></div>
+  <div class="stat-card"><div class="stat-icon blue">●</div><div><span>Categories</span><strong>{{ categories|length }}</strong><small>Same as last month</small></div></div>
+</section>
+
+<section class="grid-2">
+  <div class="panel">
+    <div class="panel-title"><h2>Monthly Spending</h2><span class="select">This Month ▾</span></div>
+    <div class="bar-chart">
+      {% for label, value in [('Jan',12400),('Feb',15200),('Mar',13800),('Apr',17600),('May',15100),('Jun',18450)] %}
+      <div class="bar-col"><div class="bar" style="height:{{ (value/18450*150)|int }}px"></div><span>{{ label }}</span></div>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-title"><h2>Spending by Category</h2></div>
+    <div class="donut-wrap">
+      <div class="donut"><div class="donut-hole"><strong>₹{{ "{:,.0f}".format(total) }}</strong><span>Total</span></div></div>
+      <div class="legend">
+        {% for cat, value in categories.items() %}
+        <div><i></i><span>{{ cat }}</span><b>{{ "{:.0f}".format(value/total*100) }}%</b></div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-title"><h2>Recent Transactions</h2><a href="{{ url_for('invoices') }}">View all →</a></div>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Merchant</th><th>Category</th><th>Amount</th><th>Date</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for t in transactions %}
+      <tr><td class="merchant">{{ t.merchant }}</td><td>{{ t.category }}</td><td>₹{{ "{:,.2f}".format(t.amount) }}</td><td>{{ t.date }}</td><td><span class="status">● {{ t.status }}</span></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endblock %}
