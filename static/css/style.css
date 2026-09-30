@@ -10,3 +10,58 @@
 
 .settings-input{width:220px;padding:10px 12px;border:1px solid #dedfeb;border-radius:8px;background:#fff;color:#303957;font:inherit;font-size:11px}
 .save-row{display:flex;justify-content:flex-end;padding:18px 0}
+/* =========================================================
+   INVOICE DETAIL - SIDE BY SIDE LAYOUT
+   ========================================================= */
+
+.detail-grid {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr) !important;
+    gap: 24px !important;
+    align-items: start !important;
+    width: 100% !important;
+}
+
+.detail-grid .invoice-preview {
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+    width: 100% !important;
+    margin: 0 !important;
+}
+
+.detail-grid .extracted {
+    grid-column: 2 !important;
+    grid-row: 1 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    align-self: start !important;
+}
+
+.detail-grid .fake-invoice {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.detail-grid .panel {
+    box-sizing: border-box;
+}
+
+/* Keep both panels side-by-side on desktop */
+@media (min-width: 900px) {
+    .detail-grid {
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr) !important;
+    }
+}
+
+/* Stack only on small screens */
+@media (max-width: 899px) {
+    .detail-grid {
+        grid-template-columns: 1fr !important;
+    }
+
+    .detail-grid .invoice-preview,
+    .detail-grid .extracted {
+        grid-column: 1 !important;
+        grid-row: auto !important;
+    }
+}
