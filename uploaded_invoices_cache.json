@@ -1,0 +1,18 @@
+[
+  {
+    "invoice_name": "test_invoice_spendsense.pdf",
+    "invoice_number": "BB-2026-0917",
+    "merchant": "BLUEBERRY BISTRO",
+    "date": "30 September 2026",
+    "amount": 1060.0,
+    "total": 1060.0,
+    "category": "Food & Dining",
+    "s3_bucket": "spendsense-invoices-megh-2026",
+    "s3_key": "invoices/46e0bfd39dbf426cbad6e0f1dcf7dfd1.pdf",
+    "file_size": 27384,
+    "content_type": "application/pdf",
+    "status": "processed",
+    "extracted_text": "BLUEBERRY BISTRO\nInvoice No: BB-2026-0917\nDate: 30 September 2026\nItem\nQuantity\nAmount\nGrilled Paneer Sandwich\n1\n■320.00\nPasta Arrabbiata\n1\n■410.00\nFresh Lime Soda\n2\n■180.00\nChocolate Brownie\n1\n■150.00\nSubtotal: ■1,060.00\nGST (5%): ■53.00\nTotal Amount: ■1,113.00\nPayment Method: UPI\nCategory: Food & Dining\nThank you for dining with us!",
+    "source": "local_pdf_parser"
+  }
+]

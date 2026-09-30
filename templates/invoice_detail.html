@@ -52,313 +52,573 @@
     }
 </style>
 
+
 <div class="invoice-detail-page">
 
-```
-<section class="page-head">
-    <div>
-        <a class="back" href="{{ url_for('invoices') }}">
-            ← Back to Invoices
-        </a>
+    <section class="page-head">
+        <div>
 
-        <h1>Invoice Analysis</h1>
+            <a class="back" href="{{ url_for('invoices') }}">
+                ← Back to Invoices
+            </a>
 
-        {% if is_aws %}
-            <p>Invoice processed through your AWS cloud pipeline.</p>
-        {% else %}
-            <p>Invoice details and extracted information.</p>
-        {% endif %}
-    </div>
-</section>
+            <h1>Invoice Analysis</h1>
+
+            {% if is_aws %}
+                <p>
+                    Invoice processed through your AWS cloud pipeline.
+                </p>
+            {% else %}
+                <p>
+                    Invoice details and extracted information.
+                </p>
+            {% endif %}
+
+        </div>
+    </section>
 
 
-<div class="invoice-detail-grid">
+    <div class="invoice-detail-grid">
 
-    <!-- =====================================================
-         LEFT: INVOICE PREVIEW
-         ===================================================== -->
-    <div class="invoice-detail-preview">
 
-        <div class="invoice-preview">
+        <!-- =====================================================
+             LEFT: INVOICE PREVIEW
+             ===================================================== -->
 
-            <div class="fake-invoice">
+        <div class="invoice-detail-preview">
 
-                {% if is_aws %}
+            <div class="invoice-preview">
 
-                    <div class="invoice-logo">
-                        SpendSense Invoice
-                    </div>
+                <div class="fake-invoice">
 
-                    <p>
-                        <strong>Invoice:</strong>
-                        {{ invoice.get("invoice_name", "Uploaded Invoice") }}
-                    </p>
+                    {% if is_aws %}
 
-                    {% if invoice.get("merchant") %}
-                    <p>
-                        <strong>Merchant:</strong>
-                        {{ invoice.get("merchant") }}
-                    </p>
+                        <div class="invoice-logo">
+                            SpendSense Invoice
+                        </div>
+
+
+                        <!-- Invoice name -->
+
+                        <p>
+                            <strong>Invoice:</strong>
+                            {{ invoice.get("invoice_name", "Uploaded Invoice") }}
+                        </p>
+
+
+                        <!-- Merchant -->
+
+                        {% if invoice.get("merchant")
+                              and invoice.get("merchant") != "Not detected" %}
+
+                        <p>
+                            <strong>Merchant:</strong>
+                            {{ invoice.get("merchant") }}
+                        </p>
+
+                        {% endif %}
+
+
+                        <!-- Invoice number -->
+
+                        {% if invoice.get("invoice_number")
+                              and invoice.get("invoice_number") != "Not detected" %}
+
+                        <p>
+                            <strong>Invoice Number:</strong>
+                            {{ invoice.get("invoice_number") }}
+                        </p>
+
+                        {% endif %}
+
+
+                        <!-- Date -->
+
+                        {% if invoice.get("date")
+                              and invoice.get("date") != "Not detected" %}
+
+                        <p>
+                            <strong>Date:</strong>
+                            {{ invoice.get("date") }}
+                        </p>
+
+                        {% endif %}
+
+
+                        <!-- =================================================
+                             TOTAL AMOUNT
+                             Supports amount / total / total_amount
+                             ================================================= -->
+
+                        {% set invoice_amount =
+                            invoice.get(
+                                "amount",
+                                invoice.get(
+                                    "total",
+                                    invoice.get("total_amount", 0)
+                                )
+                            )
+                        %}
+
+
+                        {% if invoice_amount and invoice_amount|float > 0 %}
+
+                        <p>
+                            <strong>Total:</strong>
+                            ₹{{ "{:,.2f}".format(invoice_amount|float) }}
+                        </p>
+
+                        {% endif %}
+
+
+                        <!-- Category -->
+
+                        {% if invoice.get("category") %}
+
+                        <p>
+                            <strong>Category:</strong>
+                            {{ invoice.get("category") }}
+                        </p>
+
+                        {% endif %}
+
+
+                        <hr>
+
+
+                        <!-- AWS STORAGE INFORMATION -->
+
+                        <p>
+                            <strong>Cloud Storage:</strong>
+                            Amazon S3
+                        </p>
+
+
+                        <p>
+                            <strong>S3 Bucket:</strong>
+                            {{ invoice.get("s3_bucket", "—") }}
+                        </p>
+
+
+                        <p>
+                            <strong>File Size:</strong>
+                            {{ invoice.get("file_size", 0) }} bytes
+                        </p>
+
+
+                        <p>
+                            <strong>Content Type:</strong>
+                            {{ invoice.get("content_type", "—") }}
+                        </p>
+
+
+                        <hr>
+
+
+                        <!-- Processing status -->
+
+                        <p>
+                            <strong>Processing Status:</strong>
+                            {{ invoice.get("status", "Processed")|capitalize }}
+                        </p>
+
+
+                    {% else %}
+
+
+                        <!-- =================================================
+                             DEMO EXPENSE
+                             ================================================= -->
+
+                        <div class="invoice-logo">
+                            {{ invoice.merchant }}
+                        </div>
+
+
+                        <p>
+                            <strong>Date:</strong>
+                            {{ invoice.date }}
+                        </p>
+
+
+                        <hr>
+
+
+                        <p>
+                            <strong>Category:</strong>
+                            {{ invoice.category }}
+                        </p>
+
+
+                        <p>
+                            <strong>Payment Method:</strong>
+                            Card
+                        </p>
+
+
+                        <hr>
+
+
+                        <strong>
+                            Total:
+                            ₹{{ "{:,.2f}".format(invoice.amount) }}
+                        </strong>
+
+
                     {% endif %}
 
-                    {% if invoice.get("invoice_number") %}
-                    <p>
-                        <strong>Invoice Number:</strong>
-                        {{ invoice.get("invoice_number") }}
-                    </p>
-                    {% endif %}
-
-                    {% if invoice.get("date") %}
-                    <p>
-                        <strong>Date:</strong>
-                        {{ invoice.get("date") }}
-                    </p>
-                    {% endif %}
-
-                    {% if invoice.get("total") %}
-                    <p>
-                        <strong>Total:</strong>
-                        ₹{{ invoice.get("total") }}
-                    </p>
-                    {% endif %}
-
-                    <hr>
-
-                    <p>
-                        <strong>Cloud Storage:</strong>
-                        Amazon S3
-                    </p>
-
-                    <p>
-                        <strong>S3 Bucket:</strong>
-                        {{ invoice.get("s3_bucket", "—") }}
-                    </p>
-
-                    <p>
-                        <strong>File Size:</strong>
-                        {{ invoice.get("file_size", 0) }} bytes
-                    </p>
-
-                    <p>
-                        <strong>Content Type:</strong>
-                        {{ invoice.get("content_type", "—") }}
-                    </p>
-
-                    <hr>
-
-                    <p>
-                        <strong>Processing Status:</strong>
-                        {{ invoice.get("status", "Processed")|capitalize }}
-                    </p>
-
-                {% else %}
-
-                    <div class="invoice-logo">
-                        {{ invoice.merchant }}
-                    </div>
-
-                    <p>
-                        <strong>Date:</strong>
-                        {{ invoice.date }}
-                    </p>
-
-                    <hr>
-
-                    <p>
-                        <strong>Category:</strong>
-                        {{ invoice.category }}
-                    </p>
-
-                    <p>
-                        <strong>Payment Method:</strong>
-                        Card
-                    </p>
-
-                    <hr>
-
-                    <strong>
-                        Total:
-                        ₹{{ "{:,.2f}".format(invoice.amount) }}
-                    </strong>
-
-                {% endif %}
+                </div>
 
             </div>
 
         </div>
 
-    </div>
 
 
-    <!-- =====================================================
-         RIGHT: EXTRACTED INFORMATION
-         ===================================================== -->
-    <div class="panel extracted invoice-detail-info">
+        <!-- =====================================================
+             RIGHT: EXTRACTED INFORMATION
+             ===================================================== -->
 
-        <h2>
+        <div class="panel extracted invoice-detail-info">
+
+
+            <h2>
+
+                {% if is_aws %}
+                    Extracted Invoice Information
+                {% else %}
+                    Expense Information
+                {% endif %}
+
+            </h2>
+
+
+
             {% if is_aws %}
-                Extracted Invoice Information
+
+
+                <!-- Invoice -->
+
+                <div class="field">
+
+                    <span>
+                        Invoice
+                    </span>
+
+                    <b>
+                        {{ invoice.get("invoice_name", "—") }}
+                    </b>
+
+                </div>
+
+
+
+                <!-- Merchant -->
+
+                {% if invoice.get("merchant")
+                      and invoice.get("merchant") != "Not detected" %}
+
+                <div class="field">
+
+                    <span>
+                        Merchant
+                    </span>
+
+                    <b>
+                        {{ invoice.get("merchant") }}
+                    </b>
+
+                </div>
+
+                {% endif %}
+
+
+
+                <!-- Invoice Number -->
+
+                {% if invoice.get("invoice_number")
+                      and invoice.get("invoice_number") != "Not detected" %}
+
+                <div class="field">
+
+                    <span>
+                        Invoice Number
+                    </span>
+
+                    <b>
+                        {{ invoice.get("invoice_number") }}
+                    </b>
+
+                </div>
+
+                {% endif %}
+
+
+
+                <!-- Date -->
+
+                {% if invoice.get("date")
+                      and invoice.get("date") != "Not detected" %}
+
+                <div class="field">
+
+                    <span>
+                        Date
+                    </span>
+
+                    <b>
+                        {{ invoice.get("date") }}
+                    </b>
+
+                </div>
+
+                {% endif %}
+
+
+
+                <!-- =================================================
+                     TOTAL AMOUNT
+                     ================================================= -->
+
+                {% set invoice_amount =
+                    invoice.get(
+                        "amount",
+                        invoice.get(
+                            "total",
+                            invoice.get("total_amount", 0)
+                        )
+                    )
+                %}
+
+
+                {% if invoice_amount and invoice_amount|float > 0 %}
+
+                <div class="field">
+
+                    <span>
+                        Total Amount
+                    </span>
+
+                    <b>
+                        ₹{{ "{:,.2f}".format(invoice_amount|float) }}
+                    </b>
+
+                </div>
+
+                {% else %}
+
+                <div class="field">
+
+                    <span>
+                        Total Amount
+                    </span>
+
+                    <b>
+                        Not detected
+                    </b>
+
+                </div>
+
+                {% endif %}
+
+
+
+                <!-- Category -->
+
+                {% if invoice.get("category") %}
+
+                <div class="field">
+
+                    <span>
+                        Category
+                    </span>
+
+                    <b class="tag">
+                        {{ invoice.get("category") }}
+                    </b>
+
+                </div>
+
+                {% endif %}
+
+
+
+                <!-- Cloud Storage -->
+
+                <div class="field">
+
+                    <span>
+                        Cloud Storage
+                    </span>
+
+                    <b>
+                        Amazon S3
+                    </b>
+
+                </div>
+
+
+
+                <!-- S3 Bucket -->
+
+                <div class="field">
+
+                    <span>
+                        S3 Bucket
+                    </span>
+
+                    <b>
+                        {{ invoice.get("s3_bucket", "—") }}
+                    </b>
+
+                </div>
+
+
+
+                <!-- File Size -->
+
+                <div class="field">
+
+                    <span>
+                        File Size
+                    </span>
+
+                    <b>
+                        {{ invoice.get("file_size", 0) }} bytes
+                    </b>
+
+                </div>
+
+
+
+                <!-- Content Type -->
+
+                <div class="field">
+
+                    <span>
+                        Content Type
+                    </span>
+
+                    <b>
+                        {{ invoice.get("content_type", "—") }}
+                    </b>
+
+                </div>
+
+
+
+                <!-- Processing Status -->
+
+                <div class="field">
+
+                    <span>
+                        Processing Status
+                    </span>
+
+                    <b class="status">
+                        ● {{ invoice.get("status", "Processed")|capitalize }}
+                    </b>
+
+                </div>
+
+
+
             {% else %}
-                Expense Information
+
+
+                <!-- =================================================
+                     DEMO EXPENSE INFORMATION
+                     ================================================= -->
+
+                <div class="field">
+
+                    <span>
+                        Merchant
+                    </span>
+
+                    <b>
+                        {{ invoice.merchant }}
+                    </b>
+
+                </div>
+
+
+
+                <div class="field">
+
+                    <span>
+                        Date
+                    </span>
+
+                    <b>
+                        {{ invoice.date }}
+                    </b>
+
+                </div>
+
+
+
+                <div class="field">
+
+                    <span>
+                        Total Amount
+                    </span>
+
+                    <b>
+                        ₹{{ "{:,.2f}".format(invoice.amount) }}
+                    </b>
+
+                </div>
+
+
+
+                <div class="field">
+
+                    <span>
+                        Category
+                    </span>
+
+                    <b class="tag">
+                        {{ invoice.category }}
+                    </b>
+
+                </div>
+
+
+
+                <div class="field">
+
+                    <span>
+                        Payment Method
+                    </span>
+
+                    <b>
+                        Card
+                    </b>
+
+                </div>
+
+
+
+                <div class="field">
+
+                    <span>
+                        Status
+                    </span>
+
+                    <b class="status">
+                        ● {{ invoice.status }}
+                    </b>
+
+                </div>
+
+
             {% endif %}
-        </h2>
 
 
-        {% if is_aws %}
-
-            <div class="field">
-                <span>Invoice</span>
-                <b>
-                    {{ invoice.get("invoice_name", "—") }}
-                </b>
-            </div>
-
-
-            {% if invoice.get("merchant") %}
-            <div class="field">
-                <span>Merchant</span>
-                <b>
-                    {{ invoice.get("merchant") }}
-                </b>
-            </div>
-            {% endif %}
-
-
-            {% if invoice.get("invoice_number") %}
-            <div class="field">
-                <span>Invoice Number</span>
-                <b>
-                    {{ invoice.get("invoice_number") }}
-                </b>
-            </div>
-            {% endif %}
-
-
-            {% if invoice.get("date") %}
-            <div class="field">
-                <span>Date</span>
-                <b>
-                    {{ invoice.get("date") }}
-                </b>
-            </div>
-            {% endif %}
-
-
-            {% if invoice.get("total") %}
-            <div class="field">
-                <span>Total Amount</span>
-                <b>
-                    ₹{{ invoice.get("total") }}
-                </b>
-            </div>
-            {% endif %}
-
-
-            {% if invoice.get("category") %}
-            <div class="field">
-                <span>Category</span>
-                <b class="tag">
-                    {{ invoice.get("category") }}
-                </b>
-            </div>
-            {% endif %}
-
-
-            <div class="field">
-                <span>Cloud Storage</span>
-                <b>
-                    Amazon S3
-                </b>
-            </div>
-
-
-            <div class="field">
-                <span>S3 Bucket</span>
-                <b>
-                    {{ invoice.get("s3_bucket", "—") }}
-                </b>
-            </div>
-
-
-            <div class="field">
-                <span>File Size</span>
-                <b>
-                    {{ invoice.get("file_size", 0) }} bytes
-                </b>
-            </div>
-
-
-            <div class="field">
-                <span>Content Type</span>
-                <b>
-                    {{ invoice.get("content_type", "—") }}
-                </b>
-            </div>
-
-
-            <div class="field">
-                <span>Processing Status</span>
-                <b class="status">
-                    ● {{ invoice.get("status", "Processed")|capitalize }}
-                </b>
-            </div>
-
-
-        {% else %}
-
-            <div class="field">
-                <span>Merchant</span>
-                <b>
-                    {{ invoice.merchant }}
-                </b>
-            </div>
-
-
-            <div class="field">
-                <span>Date</span>
-                <b>
-                    {{ invoice.date }}
-                </b>
-            </div>
-
-
-            <div class="field">
-                <span>Total Amount</span>
-                <b>
-                    ₹{{ "{:,.2f}".format(invoice.amount) }}
-                </b>
-            </div>
-
-
-            <div class="field">
-                <span>Category</span>
-                <b class="tag">
-                    {{ invoice.category }}
-                </b>
-            </div>
-
-
-            <div class="field">
-                <span>Payment Method</span>
-                <b>
-                    Card
-                </b>
-            </div>
-
-
-            <div class="field">
-                <span>Status</span>
-                <b class="status">
-                    ● {{ invoice.status }}
-                </b>
-            </div>
-
-        {% endif %}
+        </div>
 
     </div>
-
-</div>
-```
 
 </div>
 

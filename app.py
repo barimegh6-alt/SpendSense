@@ -6,6 +6,8 @@ import os
 import uuid
 import json
 import re
+import tempfile
+from datetime import datetime
 from pypdf import PdfReader
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -38,8 +40,8 @@ app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 # AWS CONFIGURATION
 # ============================================================
 
-AWS_PROFILE = os.getenv("AWS_PROFILE", "spendsense")
-AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
+AWS_PROFILE = os.getenv("AWS_PROFILE") or "spendsense"
+AWS_REGION = os.getenv("AWS_REGION") or "ap-south-1"
 
 S3_BUCKET = os.getenv(
     "S3_BUCKET",
@@ -71,12 +73,21 @@ if (
 
 else:
 
-    # Local development:
-    # Use the existing AWS CLI profile.
-    aws_session = boto3.Session(
-        profile_name=AWS_PROFILE,
-        region_name=AWS_REGION
-    )
+    # Local development: use the configured AWS CLI profile.
+    # If it is unavailable, fall back to boto3's normal credential chain.
+    try:
+        aws_session = boto3.Session(
+            profile_name=AWS_PROFILE,
+            region_name=AWS_REGION
+        )
+    except Exception as error:
+        print(
+            f"AWS profile '{AWS_PROFILE}' unavailable; "
+            f"using default boto3 credentials: {error}"
+        )
+        aws_session = boto3.Session(
+            region_name=AWS_REGION
+        )
 
 
 # ============================================================
@@ -262,6 +273,41 @@ transactions = [
 # not being used in this project.
 uploaded_invoices = []
 
+# Persist locally parsed uploads across Flask restarts during local development.
+# Cloud records remain stored in S3/API Gateway/Lambda/DynamoDB and are reloaded
+# from the AWS API on every request.
+UPLOAD_CACHE_FILE = os.path.join(
+    app.root_path,
+    "uploaded_invoices_cache.json"
+)
+
+def load_uploaded_invoice_cache():
+    try:
+        if os.path.exists(UPLOAD_CACHE_FILE):
+            with open(UPLOAD_CACHE_FILE, "r", encoding="utf-8") as cache_file:
+                data = json.load(cache_file)
+                if isinstance(data, list):
+                    return data
+    except Exception as error:
+        print(f"Upload cache load warning: {error}")
+    return []
+
+def save_uploaded_invoice_cache():
+    try:
+        with open(UPLOAD_CACHE_FILE, "w", encoding="utf-8") as cache_file:
+            json.dump(uploaded_invoices, cache_file, ensure_ascii=False, indent=2)
+    except Exception as error:
+        print(f"Upload cache save warning: {error}")
+
+uploaded_invoices.extend(load_uploaded_invoice_cache())
+
+# Parsed metadata cache for AWS invoices. DynamoDB currently stores
+# S3/file metadata, while the PDF itself contains the bill amount,
+# merchant, date and other fields. We parse text PDFs locally and
+# cache the result so Analytics/Categories can use the same data
+# without changing the 3-service AWS architecture.
+api_invoice_enrichment_cache = {}
+
 
 def extract_invoice_text(pdf_path):
     """
@@ -360,16 +406,37 @@ def extract_invoice_fields(text, filename):
             result["date"] = match.group(1).strip()
             break
 
-    # Total amount. Prefer lines containing total/grand total/amount due.
-    total_patterns = [
-        r"(?:grand\s+total|total\s+amount|amount\s+due|net\s+total|total)\s*[:\-]?\s*(?:₹|rs\.?|inr|\$)?\s*([\d,]+(?:\.\d{1,2})?)",
-    ]
+    # Total amount. Invoice PDFs often use formats such as:
+    #   Total: ₹1,123.50
+    #   Total .... ₹1,123.50
+    #   GRAND TOTAL     1,123.50
+    #   Amount Due: Rs. 1,123.50
+    #
+    # We inspect the complete line rather than requiring the number
+    # to appear immediately after the word "total".
+    total_keywords = (
+        "grand total",
+        "total amount",
+        "amount due",
+        "net total",
+        "balance due",
+        "total",
+    )
 
-    for pattern in total_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        if matches:
-            # Usually the final total is the most useful match.
-            amount = _clean_money(matches[-1])
+    for line in lines:
+        low_line = line.lower()
+        if not any(keyword in low_line for keyword in total_keywords):
+            continue
+
+        amount_matches = re.findall(
+            r"(?:₹|rs\.?|inr|\$)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            line,
+            re.IGNORECASE,
+        )
+
+        if amount_matches:
+            # The last number on a total line is normally the final bill total.
+            amount = _clean_money(amount_matches[-1])
             if amount is not None:
                 result["amount"] = amount
                 break
@@ -424,6 +491,9 @@ def build_uploaded_invoice_record(
         "merchant": extracted["merchant"],
         "date": extracted["date"],
         "amount": extracted["amount"],
+        # Keep "total" too because the invoice-detail template can
+        # display this field directly.
+        "total": extracted["amount"],
         "category": extracted["category"],
         "s3_bucket": S3_BUCKET,
         "s3_key": s3_key,
@@ -437,86 +507,430 @@ def build_uploaded_invoice_record(
 
 
 # ============================================================
+# DATA NORMALIZATION / COMBINATION
+# ============================================================
+
+def _to_float(value, default=0.0):
+    """Safely convert an amount-like value to float."""
+    try:
+        if value is None or value == "":
+            return default
+        if isinstance(value, str):
+            value = re.sub(r"[^0-9.\-]", "", value.replace(",", ""))
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def infer_category(text):
+    """Infer a spending category from invoice text/name/merchant."""
+    low = (text or "").lower()
+
+    if any(x in low for x in [
+        "restaurant", "cafe", "café", "food", "meal", "dining",
+        "pizza", "burger", "swiggy", "zomato", "bakery"
+    ]):
+        return "Food & Dining"
+
+    if any(x in low for x in [
+        "grocery", "groceries", "supermarket", "reliance fresh",
+        "dmart", "d-mart", "vegetables", "provisions"
+    ]):
+        return "Groceries"
+
+    if any(x in low for x in [
+        "uber", "ola", "taxi", "cab", "transport", "metro",
+        "railway", "flight", "airlines", "travel", "bus"
+    ]):
+        return "Travel"
+
+    if any(x in low for x in [
+        "amazon", "flipkart", "shopping", "retail", "clothing",
+        "fashion", "mall", "store"
+    ]):
+        return "Shopping"
+
+    if any(x in low for x in [
+        "electricity", "electric", "water bill", "internet",
+        "broadband", "airtel", "jio", "vodafone", "utility",
+        "utilities", "recharge"
+    ]):
+        return "Utilities"
+
+    if any(x in low for x in [
+        "movie", "cinema", "netflix", "spotify", "entertainment",
+        "gaming", "bookmyshow"
+    ]):
+        return "Entertainment"
+
+    return "Other"
+
+
+def normalize_transaction(record):
+    """Convert any expense/invoice record into one common structure."""
+    record = record or {}
+
+    invoice_name = (
+        record.get("invoice_name")
+        or record.get("filename")
+        or ""
+    )
+
+    merchant = (
+        record.get("merchant")
+        or record.get("vendor")
+        or record.get("shop_name")
+        or invoice_name
+        or "AWS Invoice"
+    )
+
+    amount = _to_float(
+        record.get(
+            "amount",
+            record.get("total", record.get("total_amount", 0))
+        )
+    )
+
+    date = (
+        record.get("date")
+        or record.get("invoice_date")
+        or record.get("uploaded_at")
+        or "Processed"
+    )
+
+    searchable_text = " ".join([
+        str(invoice_name),
+        str(merchant),
+        str(record.get("extracted_text", "")),
+        str(record.get("description", "")),
+        str(record.get("items", "")),
+        str(record.get("category", "")),
+    ])
+
+    category = record.get("category")
+
+    if not category or str(category).strip().lower() in {
+        "uncategorized", "unknown", "not detected", "other"
+    }:
+        inferred = infer_category(searchable_text)
+        if inferred != "Other" or not category:
+            category = inferred
+
+    return {
+        "date": date,
+        "uploaded_at": record.get("uploaded_at", ""),
+        "merchant": merchant,
+        "category": category,
+        "amount": amount,
+        "total": amount,
+        "status": record.get("status", "Processed"),
+        "invoice_name": invoice_name,
+        "invoice_number": record.get("invoice_number", "Not detected"),
+        "s3_key": record.get("s3_key", ""),
+        "s3_bucket": record.get("s3_bucket", S3_BUCKET),
+        "file_size": record.get("file_size", 0),
+        "content_type": record.get(
+            "content_type", "application/octet-stream"
+        ),
+        "source": record.get("source", "aws_api"),
+    }
+
+
+def enrich_api_invoice(record):
+    """
+    Enrich an API/DynamoDB invoice record when the backend only has
+    S3/file metadata.
+
+    For text-based PDFs, download the PDF from S3 and run the same
+    local pypdf parser used for freshly uploaded invoices. This gives
+    Analytics, Categories and the dashboard a real amount/category
+    while keeping:
+        Amazon S3
+        API Gateway
+        Lambda + DynamoDB
+    as the cloud architecture.
+
+    Image/scanned invoices are left unchanged because Textract/OCR
+    is intentionally not part of this project.
+    """
+    record = dict(record or {})
+
+    key = record.get("s3_key") or record.get("expense_id") or ""
+    if key.startswith("invoices/") is False:
+        return record
+
+    # If a usable amount is already present, only add total for
+    # template compatibility.
+    existing_amount = _to_float(
+        record.get(
+            "amount",
+            record.get("total", record.get("total_amount", 0)),
+        )
+    )
+
+    if existing_amount > 0:
+        record["amount"] = existing_amount
+        record["total"] = existing_amount
+        return record
+
+    if key in api_invoice_enrichment_cache:
+        cached = api_invoice_enrichment_cache[key]
+        merged = dict(record)
+        merged.update(cached)
+        return merged
+
+    filename = record.get("invoice_name") or os.path.basename(key)
+
+    # Only attempt local parsing for PDF objects. There is no OCR
+    # available for PNG/JPG in this project.
+    extension = os.path.splitext(filename)[1].lower()
+    if extension != ".pdf":
+        return record
+
+    temp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=".pdf",
+            delete=False,
+        ) as temp_file:
+            temp_path = temp_file.name
+
+        print(f"Enriching AWS PDF from S3: {key}")
+
+        s3.download_file(
+            record.get("s3_bucket") or S3_BUCKET,
+            key,
+            temp_path,
+        )
+
+        extracted_text = extract_invoice_text(temp_path)
+        extracted = extract_invoice_fields(
+            extracted_text,
+            filename,
+        )
+
+        # Only enrich fields that the PDF parser actually found.
+        enrichment = {
+            "extracted_text": extracted_text,
+            "source": "aws_api_s3_local_pdf_parser",
+        }
+
+        if extracted.get("invoice_number") != "Not detected":
+            enrichment["invoice_number"] = extracted["invoice_number"]
+
+        if extracted.get("merchant") != "Not detected":
+            enrichment["merchant"] = extracted["merchant"]
+
+        if extracted.get("date") != "Not detected":
+            enrichment["date"] = extracted["date"]
+
+        parsed_amount = _to_float(extracted.get("amount", 0))
+        if parsed_amount > 0:
+            enrichment["amount"] = parsed_amount
+            enrichment["total"] = parsed_amount
+
+        parsed_category = extracted.get("category")
+        if parsed_category and parsed_category != "Other":
+            enrichment["category"] = parsed_category
+
+        api_invoice_enrichment_cache[key] = enrichment
+
+        merged = dict(record)
+        merged.update(enrichment)
+
+        print(
+            "AWS PDF enrichment:",
+            merged.get("merchant", "Not detected"),
+            merged.get("amount", 0),
+            merged.get("category", "Other"),
+        )
+
+        return merged
+
+    except Exception as error:
+        print(
+            f"AWS PDF enrichment skipped for {key}: {error}"
+        )
+        return record
+
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def get_combined_expenses():
+    """
+    Combine demo transactions, locally parsed uploads and AWS records.
+
+    If the same uploaded invoice exists locally and in the AWS API,
+    the locally parsed version is preferred because it contains the
+    amount/category extracted from the PDF.
+    """
+    api_expenses = get_expenses_from_api()
+
+    combined = [normalize_transaction(t) for t in transactions]
+
+    local_by_key = {}
+    local_by_name = {}
+
+    for record in uploaded_invoices:
+        normalized = normalize_transaction(record)
+
+        if normalized["s3_key"]:
+            local_by_key[normalized["s3_key"]] = normalized
+
+        if normalized["invoice_name"]:
+            local_by_name[normalized["invoice_name"]] = normalized
+
+    api_keys = set()
+    api_names = set()
+
+    for raw_record in api_expenses:
+        # First enrich text PDFs from S3 when DynamoDB only contains
+        # file metadata.
+        record = enrich_api_invoice(raw_record)
+
+        key = record.get("s3_key") or record.get("expense_id") or ""
+        name = record.get("invoice_name") or ""
+
+        local = local_by_key.get(key) or local_by_name.get(name)
+
+        if local:
+            combined.append(local)
+        else:
+            combined.append(normalize_transaction(record))
+
+        if key:
+            api_keys.add(key)
+
+        if name:
+            api_names.add(name)
+
+    # Immediately include a fresh upload even if Lambda/DynamoDB
+    # has not returned it through API Gateway yet.
+    for record in uploaded_invoices:
+        key = record.get("s3_key") or ""
+        name = record.get("invoice_name") or ""
+
+        if key and key in api_keys:
+            continue
+
+        if name and name in api_names:
+            continue
+
+        combined.append(normalize_transaction(record))
+
+    return combined, api_expenses
+
+
+def calculate_category_totals(all_transactions):
+    totals = {}
+
+    for transaction in all_transactions:
+        category = transaction.get("category") or "Other"
+        amount = _to_float(transaction.get("amount", 0))
+        totals[category] = totals.get(category, 0) + amount
+
+    return totals
+
+
+# ============================================================
 # DASHBOARD
 # ============================================================
 
 @app.route("/")
 def dashboard():
-    aws_expenses = get_expenses_from_api()
+    all_transactions, aws_expenses = get_combined_expenses()
 
-    # Start with the existing demo transactions.
-    all_transactions = list(transactions)
-
-    # Convert AWS records into dashboard-compatible transactions
-    # only when useful financial fields are available.
-    for invoice in aws_expenses:
-        amount = invoice.get("amount", invoice.get("total", 0))
-
-        try:
-            amount = float(amount or 0)
-        except (TypeError, ValueError):
-            amount = 0.0
-
-        category = invoice.get("category", "Uncategorized")
-
-        merchant = (
-            invoice.get("merchant")
-            or invoice.get("invoice_name")
-            or "AWS Invoice"
-        )
-
-        date = (
-            invoice.get("date")
-            or invoice.get("uploaded_at")
-            or "Processed"
-        )
-
-        all_transactions.append({
-            "date": date,
-            "merchant": merchant,
-            "category": category,
-            "amount": amount,
-            "status": invoice.get("status", "Processed")
-        })
-
-    # Total financial spending
+    # --------------------------------------------------------
+    # TOTAL SPENDING
+    # --------------------------------------------------------
     total = sum(
-        t.get("amount", 0)
+        _to_float(t.get("amount", 0))
         for t in all_transactions
     )
 
-    # Category totals
-    categories = {}
+    # --------------------------------------------------------
+    # CATEGORY TOTALS
+    # --------------------------------------------------------
+    categories = calculate_category_totals(all_transactions)
 
-    for t in all_transactions:
-        category = t.get("category", "Uncategorized")
+    # --------------------------------------------------------
+    # TRANSACTION COUNT
+    # --------------------------------------------------------
+    transaction_count = len(all_transactions)
 
-        try:
-            amount = float(t.get("amount", 0) or 0)
-        except (TypeError, ValueError):
-            amount = 0.0
+    # --------------------------------------------------------
+    # RECENT TRANSACTIONS
+    #
+    # The old code used all_transactions[:5].
+    # Since demo transactions are stored first, that caused
+    # the dashboard to always show The Urban Cafe, Swiggy, etc.
+    #
+    # We now sort by the invoice date/upload date so that newly
+    # uploaded invoices appear at the top.
+    # --------------------------------------------------------
 
-        categories[category] = (
-            categories.get(category, 0) + amount
+    def transaction_sort_key(transaction):
+        date_value = (
+            transaction.get("date")
+            or transaction.get("uploaded_at")
+            or ""
         )
 
-    # Number of actual processed AWS invoices
-    invoice_count = len(aws_expenses)
+        if not date_value:
+            return datetime.min
 
-    # If there are no AWS invoices yet, retain demo count
-    if invoice_count == 0:
-        invoice_count = len(transactions)
+        date_text = str(date_value).strip()
+
+        # ISO date/time from AWS
+        try:
+            return datetime.fromisoformat(
+                date_text.replace("Z", "+00:00")
+            ).replace(tzinfo=None)
+        except Exception:
+            pass
+
+        # Demo dates such as "21 Sep 2026"
+        for fmt in [
+            "%d %b %Y",
+            "%d %B %Y",
+            "%Y-%m-%d"
+        ]:
+            try:
+                return datetime.strptime(
+                    date_text,
+                    fmt
+                )
+            except Exception:
+                pass
+
+        return datetime.min
+
+    recent_transactions = sorted(
+        all_transactions,
+        key=transaction_sort_key,
+        reverse=True
+    )[:5]
+
+    # --------------------------------------------------------
+    # DASHBOARD
+    # --------------------------------------------------------
 
     return render_template(
         "dashboard.html",
-        transactions=all_transactions[:5],
+        transactions=recent_transactions,
         total=total,
         categories=categories,
-        invoice_count=invoice_count,
+        invoice_count=transaction_count,
+        transaction_count=transaction_count,
         aws_expenses=aws_expenses,
         api_url=API_URL
     )
-
 
 
 # ============================================================
@@ -661,8 +1075,22 @@ def upload_invoice():
                 content_type=content_type,
             )
 
+            # Reuse the same category rules used by Analytics/Categories.
+            if (
+                not invoice_record.get("category")
+                or invoice_record.get("category") == "Other"
+            ):
+                invoice_record["category"] = infer_category(
+                    " ".join([
+                        invoice_record.get("merchant", ""),
+                        invoice_record.get("invoice_name", ""),
+                        invoice_record.get("extracted_text", ""),
+                    ])
+                )
+
             # Keep the newest upload at the top.
             uploaded_invoices.insert(0, invoice_record)
+            save_uploaded_invoice_cache()
 
             if invoice_record["extracted_text"]:
                 print("SUCCESS: Invoice text extracted locally.")
@@ -743,44 +1171,80 @@ def upload_invoice():
 
 
 # ============================================================
+# INVOICE DISPLAY LIST
+# ============================================================
+
+def get_invoice_records_for_display():
+    """
+    Return the exact invoice list used by the Invoices page.
+
+    Local parsed uploads are placed first so the newest upload is easy to
+    find. Older records are fetched from API Gateway/DynamoDB and enriched
+    from their S3 PDF when possible. Duplicate local/API records are removed.
+    """
+    api_expenses = get_expenses_from_api()
+    display_records = []
+    seen_keys = set()
+    seen_names = set()
+
+    for local_record in uploaded_invoices:
+        record = normalize_transaction(local_record)
+        display_records.append(record)
+
+        key = record.get("s3_key") or ""
+        name = record.get("invoice_name") or ""
+        if key:
+            seen_keys.add(key)
+        if name:
+            seen_names.add(name)
+
+    for raw_record in api_expenses:
+        record = enrich_api_invoice(raw_record)
+        key = record.get("s3_key") or record.get("expense_id") or ""
+        name = record.get("invoice_name") or ""
+
+        if (key and key in seen_keys) or (name and name in seen_names):
+            continue
+
+        normalized = normalize_transaction(record)
+        display_records.append(normalized)
+
+        if key:
+            seen_keys.add(key)
+        if name:
+            seen_names.add(name)
+
+    return display_records
+
+
+# ============================================================
 # INVOICES
 # ============================================================
 
 @app.route("/invoices")
 def invoices():
+    category = request.args.get("category")
 
-    category = request.args.get(
-        "category"
-    )
+    invoice_records = get_invoice_records_for_display()
 
-    api_expenses = get_expenses_from_api()
-
-    # Keep API/DynamoDB records intact and place newly uploaded
-    # locally-extracted invoices above them.
-    aws_expenses = uploaded_invoices + api_expenses
+    if category:
+        invoice_records = [
+            record
+            for record in invoice_records
+            if record.get("category") == category
+        ]
 
     visible_transactions = [
-
         transaction
-
         for transaction in transactions
-
-        if (
-            not category
-            or transaction["category"] == category
-        )
-
+        if not category or transaction["category"] == category
     ]
 
     return render_template(
         "invoices.html",
-
         transactions=visible_transactions,
-
         category=category,
-
-        aws_expenses=aws_expenses,
-
+        aws_expenses=invoice_records,
         api_url=API_URL
     )
 
@@ -791,156 +1255,33 @@ def invoices():
 
 @app.route("/analytics")
 def analytics():
-    aws_expenses = get_expenses_from_api()
+    all_transactions, aws_expenses = get_combined_expenses()
 
-    all_transactions = list(transactions)
-
-    for invoice in aws_expenses:
-        amount = invoice.get(
-            "amount",
-            invoice.get("total", 0)
-        )
-
-        try:
-            amount = float(amount or 0)
-        except (TypeError, ValueError):
-            amount = 0.0
-
-        category = invoice.get(
-            "category",
-            "Uncategorized"
-        )
-
-        merchant = (
-            invoice.get("merchant")
-            or invoice.get("invoice_name")
-            or "AWS Invoice"
-        )
-
-        date = (
-            invoice.get("date")
-            or invoice.get("uploaded_at")
-            or "Processed"
-        )
-
-        all_transactions.append({
-            "date": date,
-            "merchant": merchant,
-            "category": category,
-            "amount": amount,
-            "status": invoice.get(
-                "status",
-                "Processed"
-            )
-        })
-
-    categories = {}
-
-    for transaction in all_transactions:
-        category = transaction.get(
-            "category",
-            "Uncategorized"
-        )
-
-        try:
-            amount = float(
-                transaction.get("amount", 0) or 0
-            )
-        except (TypeError, ValueError):
-            amount = 0.0
-
-        categories[category] = (
-            categories.get(category, 0)
-            + amount
-        )
+    categories = calculate_category_totals(all_transactions)
 
     total = sum(
-        transaction.get("amount", 0)
-        for transaction in all_transactions
+        _to_float(t.get("amount", 0))
+        for t in all_transactions
     )
 
-    invoice_count = len(aws_expenses)
-
-    if invoice_count == 0:
-        invoice_count = len(transactions)
+    transaction_count = len(all_transactions)
 
     return render_template(
         "analytics.html",
         transactions=all_transactions,
         categories=categories,
         total=total,
-        invoice_count=invoice_count,
+        invoice_count=transaction_count,
+        transaction_count=transaction_count,
         aws_expenses=aws_expenses
     )
 
-# ============================================================
-# CATEGORIES
-# ============================================================
 
 @app.route("/categories")
 def categories():
-    aws_expenses = get_expenses_from_api()
+    all_transactions, aws_expenses = get_combined_expenses()
 
-    all_transactions = list(transactions)
-
-    for invoice in aws_expenses:
-        amount = invoice.get(
-            "amount",
-            invoice.get("total", 0)
-        )
-
-        try:
-            amount = float(amount or 0)
-        except (TypeError, ValueError):
-            amount = 0.0
-
-        category = invoice.get(
-            "category",
-            "Uncategorized"
-        )
-
-        merchant = (
-            invoice.get("merchant")
-            or invoice.get("invoice_name")
-            or "AWS Invoice"
-        )
-
-        date = (
-            invoice.get("date")
-            or invoice.get("uploaded_at")
-            or "Processed"
-        )
-
-        all_transactions.append({
-            "date": date,
-            "merchant": merchant,
-            "category": category,
-            "amount": amount,
-            "status": invoice.get(
-                "status",
-                "Processed"
-            )
-        })
-
-    category_totals = {}
-
-    for transaction in all_transactions:
-        category = transaction.get(
-            "category",
-            "Uncategorized"
-        )
-
-        try:
-            amount = float(
-                transaction.get("amount", 0) or 0
-            )
-        except (TypeError, ValueError):
-            amount = 0.0
-
-        category_totals[category] = (
-            category_totals.get(category, 0)
-            + amount
-        )
+    category_totals = calculate_category_totals(all_transactions)
 
     return render_template(
         "categories.html",
@@ -948,6 +1289,7 @@ def categories():
         transactions=all_transactions,
         aws_expenses=aws_expenses
     )
+
 
 # ============================================================
 # SETTINGS
@@ -1024,33 +1366,25 @@ def uploaded_invoice_detail(index):
 
 @app.route("/invoice/aws/<int:index>")
 def aws_invoice_detail(index):
-
     """
-    Show an invoice returned from:
+    Show the same invoice record that was clicked on the Invoices page.
 
-    API Gateway → Lambda → DynamoDB
+    The page contains both locally parsed uploads and API/DynamoDB records,
+    so the detail route must use the same combined list instead of indexing
+    the API response directly.
     """
+    invoice_records = get_invoice_records_for_display()
 
-    aws_expenses = get_expenses_from_api()
+    if index < 0 or index >= len(invoice_records):
+        return "AWS Invoice not found", 404
 
-    if (
-        index < 0
-        or index >= len(aws_expenses)
-    ):
-
-        return (
-            "AWS Invoice not found",
-            404
-        )
-
-    invoice = aws_expenses[index]
+    invoice = invoice_records[index]
 
     return render_template(
         "invoice_detail.html",
-
         invoice=invoice,
-
-        is_aws=True
+        is_aws=True,
+        is_uploaded=invoice.get("source") != "aws_api"
     )
 
 
