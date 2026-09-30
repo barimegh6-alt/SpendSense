@@ -1,7 +1,5 @@
-@"
 Flask<4.0,>=3.0
 Werkzeug<4.0,>=3.0
 gunicorn
 boto3
 botocore<2.0,>=1.35
-"@ | Set-Content requirements.txt
