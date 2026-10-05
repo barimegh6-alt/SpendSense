@@ -359,11 +359,8 @@ def _clean_money(value):
 
 def extract_invoice_fields(text, filename):
     """
-    Best-effort extraction for ordinary text PDFs.
-
-    We deliberately keep this conservative. If a field cannot be
-    confidently found, it is shown as 'Not detected' rather than
-    inventing invoice data.
+    Extract common invoice fields from selectable-text PDFs.
+    Keeps the existing AWS/S3 workflow unchanged.
     """
     result = {
         "invoice_name": filename,
@@ -378,99 +375,186 @@ def extract_invoice_fields(text, filename):
     if not text:
         return result
 
+    # Normalize PDF text while preserving useful line boundaries.
     lines = [
         re.sub(r"\s+", " ", line).strip()
         for line in text.splitlines()
         if line.strip()
     ]
 
-    # Invoice number
-    invoice_patterns = [
-        r"(?:invoice\s*(?:no|number|#)?|bill\s*(?:no|number|#)?)\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9./_-]*)",
-    ]
-    for pattern in invoice_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            result["invoice_number"] = match.group(1).strip()
-            break
+    normalized_text = "\n".join(lines)
 
-    # Date
+    # ---------------------------------------------------------
+    # INVOICE NUMBER
+    # ---------------------------------------------------------
+    invoice_patterns = [
+        r"\binvoice\s*(?:no\.?|number|#)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9./_-]*)",
+        r"\binvoice\s*[:\-]\s*([A-Za-z0-9][A-Za-z0-9./_-]*)",
+        r"\bbill\s*(?:no\.?|number|#)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9./_-]*)",
+        r"\bbill\s*[:\-]\s*([A-Za-z0-9][A-Za-z0-9./_-]*)",
+    ]
+
+    for pattern in invoice_patterns:
+        match = re.search(pattern, normalized_text, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip()
+
+            # Don't accidentally use a generic word such as
+            # "Invoice" or "Bill" as the invoice number.
+            if candidate.lower() not in {
+                "invoice",
+                "bill",
+                "number",
+                "no",
+            }:
+                result["invoice_number"] = candidate
+                break
+
+    # ---------------------------------------------------------
+    # DATE
+    # ---------------------------------------------------------
     date_patterns = [
         r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
         r"\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4})\b",
         r"\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{2,4})\b",
     ]
+
     for pattern in date_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        match = re.search(pattern, normalized_text, re.IGNORECASE)
         if match:
             result["date"] = match.group(1).strip()
             break
 
-    # Total amount. Invoice PDFs often use formats such as:
-    #   Total: ₹1,123.50
-    #   Total .... ₹1,123.50
-    #   GRAND TOTAL     1,123.50
-    #   Amount Due: Rs. 1,123.50
+      # ---------------------------------------------------------
+    # TOTAL AMOUNT
+    # ---------------------------------------------------------
+    # PDF extraction can place the label and amount on separate
+    # lines, for example:
     #
-    # We inspect the complete line rather than requiring the number
-    # to appear immediately after the word "total".
-    total_keywords = (
+    # Grand Total
+    # Rs. 6,602.10
+    #
+    # So we check both the current line and the next few lines.
+
+    total_keywords = [
         "grand total",
         "total amount",
         "amount due",
         "net total",
         "balance due",
         "total",
-    )
+    ]
 
-    for line in lines:
+    total_candidates = []
+
+    for index, line in enumerate(lines):
         low_line = line.lower()
+
         if not any(keyword in low_line for keyword in total_keywords):
             continue
 
+        # Check the current line plus the next 3 lines.
+        nearby_lines = lines[index:index + 4]
+        nearby_text = " ".join(nearby_lines)
+
         amount_matches = re.findall(
-            r"(?:₹|rs\.?|inr|\$)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
-            line,
+            r"(?:₹|rs\.?|inr|\$)?\s*"
+            r"([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
+            nearby_text,
             re.IGNORECASE,
         )
 
-        if amount_matches:
-            # The last number on a total line is normally the final bill total.
-            amount = _clean_money(amount_matches[-1])
-            if amount is not None:
-                result["amount"] = amount
-                break
+        for value in amount_matches:
+            cleaned = _clean_money(value)
 
-    # Merchant: first plausible heading before invoice metadata.
+            if cleaned is not None and cleaned > 0:
+                total_candidates.append(cleaned)
+
+    if total_candidates:
+        # The last amount associated with the total section
+        # is normally the final invoice total.
+        result["amount"] = total_candidates[-1]
+
+    # ---------------------------------------------------------
+    # MERCHANT
+    # ---------------------------------------------------------
     merchant_candidates = []
-    for line in lines[:12]:
+
+    for line in lines[:15]:
         low = line.lower()
+
         if any(word in low for word in [
-            "invoice", "bill", "date", "gst", "tax", "phone",
-            "email", "address", "total", "amount", "receipt"
+            "invoice",
+            "bill",
+            "date",
+            "gst",
+            "tax",
+            "phone",
+            "email",
+            "address",
+            "total",
+            "amount",
+            "receipt",
+            "customer",
+            "payment",
         ]):
             continue
+
         if re.search(r"\d{6,}", line):
             continue
+
         if 2 <= len(line) <= 80:
             merchant_candidates.append(line)
 
     if merchant_candidates:
         result["merchant"] = merchant_candidates[0]
 
-    # Basic category inference from extracted words.
-    low_text = text.lower()
-    if any(x in low_text for x in ["restaurant", "cafe", "food", "meal", "dining", "pizza", "burger"]):
+    # ---------------------------------------------------------
+    # CATEGORY
+    # ---------------------------------------------------------
+    low_text = normalized_text.lower()
+
+    if any(x in low_text for x in [
+        "restaurant",
+        "cafe",
+        "food",
+        "meal",
+        "dining",
+        "pizza",
+        "burger",
+    ]):
         result["category"] = "Food & Dining"
-    elif any(x in low_text for x in ["uber", "ola", "taxi", "transport", "cab"]):
+
+    elif any(x in low_text for x in [
+        "uber",
+        "ola",
+        "taxi",
+        "transport",
+        "cab",
+    ]):
         result["category"] = "Travel"
-    elif any(x in low_text for x in ["amazon", "shopping", "store", "retail"]):
+
+    elif any(x in low_text for x in [
+        "amazon",
+        "shopping",
+        "store",
+        "retail",
+        "electronics",
+        "keyboard",
+        "mouse",
+        "laptop",
+        "usb",
+    ]):
         result["category"] = "Shopping"
-    elif any(x in low_text for x in ["grocery", "groceries", "supermarket"]):
+
+    elif any(x in low_text for x in [
+        "grocery",
+        "groceries",
+        "supermarket",
+    ]):
         result["category"] = "Groceries"
 
     return result
-
 
 def build_uploaded_invoice_record(
     original_filename,
