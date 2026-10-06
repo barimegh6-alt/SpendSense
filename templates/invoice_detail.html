@@ -165,7 +165,7 @@
 
                         <p>
                             <strong>Total:</strong>
-                            ₹{{ "{:,.2f}".format(invoice_amount|float) }}
+                            {{ invoice_amount|float|money(2) }}
                         </p>
 
                         {% endif %}
@@ -261,7 +261,7 @@
 
                         <strong>
                             Total:
-                            ₹{{ "{:,.2f}".format(invoice.amount) }}
+                            {{ invoice.amount|money(2) }}
                         </strong>
 
 
@@ -400,7 +400,7 @@
                     </span>
 
                     <b>
-                        ₹{{ "{:,.2f}".format(invoice_amount|float) }}
+                        {{ invoice_amount|float|money(2) }}
                     </b>
 
                 </div>
@@ -565,7 +565,7 @@
                     </span>
 
                     <b>
-                        ₹{{ "{:,.2f}".format(invoice.amount) }}
+                        {{ invoice.amount|money(2) }}
                     </b>
 
                 </div>

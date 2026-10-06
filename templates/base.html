@@ -38,7 +38,7 @@
   <main class="main">
     <header class="topbar">
       <div class="search">⌕ <span>Search invoices, merchants...</span></div>
-      <div class="profile"><span class="avatar">A</span><span>Hi, Ananya</span><span>⋮</span></div>
+      <div class="profile"><span class="avatar">{{ (app_settings.name or "A")[:1]|upper }}</span><span>Hi, {{ app_settings.name }}</span><span>⋮</span></div>
     </header>
 
     {% with messages = get_flashed_messages() %}

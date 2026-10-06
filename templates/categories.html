@@ -7,7 +7,7 @@
   <a class="category-card" href="/invoices?category={{ cat|urlencode }}">
     <div class="category-dot"></div>
     <div><h3>{{ cat }}</h3><p>Click to view matching invoices</p></div>
-    <strong>₹{{ "{:,.2f}".format(value) }} →</strong>
+    <strong>{{ value|money(2) }} →</strong>
   </a>
 {% endfor %}
 </div>

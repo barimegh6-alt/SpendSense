@@ -65,3 +65,56 @@
         grid-row: auto !important;
     }
 }
+/* =========================================================
+   REAL-DATA CHARTS, ANALYTICS & SETTINGS (added)
+   ========================================================= */
+
+/* Dashboard bar chart: value label above each bar */
+.bar-chart{gap:4px}
+.bar-col{flex:1;min-width:0}
+.bar-val{font-style:normal;font-size:9px;font-weight:600;color:#596078;white-space:nowrap}
+.chart-note{margin:12px 0 0;font-size:10px;color:#9096a8}
+
+/* Analytics line chart (SVG) */
+.chart-svg{display:block;width:100%;height:auto;max-height:260px}
+.chart-grid{stroke:#eceef5;stroke-width:1}
+.chart-axis{font-size:11px;fill:#8b91a5;font-family:Inter,Arial,sans-serif}
+.chart-line{fill:none;stroke:#6257e8;stroke-width:3;stroke-linejoin:round;stroke-linecap:round}
+.chart-area{fill:#6257e8;opacity:.08}
+.chart-dot{fill:#fff;stroke:#6257e8;stroke-width:2.5}
+
+/* Meters (category / merchant share, budget) */
+.meter{height:10px;background:#eef0f7;border-radius:20px;overflow:hidden}
+.meter.small{height:6px;margin-top:8px}
+.meter-fill{height:100%;background:#6257e8;border-radius:20px;min-width:0}
+.cat-row{padding:14px 16px;border-bottom:1px solid #f0f0f5;font-size:11px}
+.cat-row-top{display:flex;justify-content:space-between;gap:12px;align-items:center}
+.cat-row-top span{display:flex;align-items:center;gap:8px;min-width:0;overflow-wrap:anywhere}
+.cat-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.muted{color:#9096a8}
+
+/* Budget panel */
+.budget-line{margin:12px 0 0;font-size:11px;color:#596078}
+.budget-ok .meter-fill{background:#16a97b}
+.budget-warn .meter-fill{background:#f2b34d}
+.budget-over .meter-fill{background:#df6c78}
+.budget-alert{margin-top:12px;background:#fff4e6;color:#99631e;padding:10px 14px;border-radius:8px;font-size:11px}
+.budget-over .budget-alert{background:#fdeef0;color:#b0404f}
+
+/* Settings: the toggle now reflects its real state */
+.switch span{background:#d3d6e4;transition:.2s}
+.switch span:before{left:3px}
+.switch input:checked+span{background:#5d50e8}
+.switch input:checked+span:before{left:21px}
+.switch input:focus-visible+span{outline:2px solid #5d50e8;outline-offset:2px}
+.save-row{gap:10px}
+.settings-note{margin:0;padding:0 0 18px;font-size:10px;color:#9096a8}
+.settings-input:focus{outline:2px solid #b9b5fa;border-color:#8278ee}
+
+@media(max-width:700px){
+  .settings-input{width:150px}
+  .setting-row{gap:12px;padding:10px 0}
+  .bar{width:18px}
+  .donut-wrap{flex-direction:column}
+  .legend{width:100%}
+}

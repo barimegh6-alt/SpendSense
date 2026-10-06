@@ -155,7 +155,7 @@
                 </td>
 
                 <td>
-                    ₹{{ "{:,.2f}".format(t.amount) }}
+                    {{ t.amount|money(2) }}
                 </td>
 
                 <td>

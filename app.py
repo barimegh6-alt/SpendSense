@@ -1,12 +1,51 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
+import os
+import socket
+
+# ============================================================
+# NETWORK: PREFER IPv4 FOR OUTGOING CONNECTIONS
+# ============================================================
+# On some networks (for example phone hotspots) IPv6 addresses are returned
+# for AWS hosts but do not actually work. Python then waits for each IPv6
+# address to time out before trying IPv4, which made API Gateway calls take
+# ~20s and S3 uploads appear to hang. Looking up IPv4 addresses first avoids
+# that wait. This only changes how host names are resolved; it does not
+# change any AWS service, URL, bucket or request.
+#
+# To turn it off, set the environment variable SPENDSENSE_FORCE_IPV4=0.
+
+if os.getenv("SPENDSENSE_FORCE_IPV4", "1") != "0":
+
+    _original_getaddrinfo = socket.getaddrinfo
+
+    def _ipv4_first_getaddrinfo(
+        host, port, family=0, type=0, proto=0, flags=0
+    ):
+        if family in (0, socket.AF_UNSPEC):
+            try:
+                return _original_getaddrinfo(
+                    host, port, socket.AF_INET, type, proto, flags
+                )
+            except socket.gaierror:
+                pass  # no IPv4 address: fall back to the normal lookup
+
+        return _original_getaddrinfo(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = _ipv4_first_getaddrinfo
+
+
+from flask import Flask, render_template, request, redirect, url_for, flash, g, has_request_context
 from werkzeug.utils import secure_filename
 from botocore.exceptions import BotoCoreError, ClientError
+from botocore.config import Config
 import boto3
 import os
 import uuid
 import json
 import re
 import tempfile
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pypdf import PdfReader
 from urllib.request import Request, urlopen
@@ -99,19 +138,43 @@ s3 = aws_session.client(
     region_name=AWS_REGION
 )
 
+# Separate client used ONLY for the background "read the PDF back from S3"
+# enrichment step. It has short timeouts and no retries so a slow/blocked
+# connection cannot freeze a page for minutes. The upload client above
+# (s3) is unchanged.
+s3_enrichment = aws_session.client(
+    "s3",
+    region_name=AWS_REGION,
+    config=Config(
+        connect_timeout=4,
+        read_timeout=8,
+        retries={"max_attempts": 1},
+    )
+)
+
+# S3 PDF reading happens in background threads (never inside a page
+# request), so pages open immediately and amounts for not-yet-read
+# invoices appear on the next refresh.
+_enrichment_executor = ThreadPoolExecutor(max_workers=2)
+_enrichment_lock = threading.Lock()
+api_invoice_pending = set()
+
 
 # ============================================================
 # API GATEWAY → LAMBDA → DYNAMODB
 # ============================================================
 
-def get_expenses_from_api():
+def _fetch_expenses_from_api_now():
     """
     Fetch invoice/expense records from:
 
     API Gateway → Lambda → DynamoDB
 
-    Returns an empty list if the API is unavailable.
+    Returns None if the API is unavailable (the caller keeps the last
+    good result instead of showing nothing).
     """
+
+    started = time.time()
 
     try:
 
@@ -129,6 +192,8 @@ def get_expenses_from_api():
 
             data = json.loads(raw_data)
 
+        print(f"API call took {time.time() - started:.1f}s")
+
         if data.get("success"):
 
             return data.get("expenses", [])
@@ -138,7 +203,7 @@ def get_expenses_from_api():
             data
         )
 
-        return []
+        return None
 
     except HTTPError as error:
 
@@ -147,7 +212,7 @@ def get_expenses_from_api():
             f"{error.code} - {error.reason}"
         )
 
-        return []
+        return None
 
     except URLError as error:
 
@@ -156,7 +221,7 @@ def get_expenses_from_api():
             f"{error.reason}"
         )
 
-        return []
+        return None
 
     except Exception as error:
 
@@ -164,7 +229,75 @@ def get_expenses_from_api():
             f"Unexpected API error: {error}"
         )
 
-        return []
+        return None
+
+
+# ------------------------------------------------------------
+# NON-BLOCKING ACCESS TO THE API (stale-while-revalidate)
+# ------------------------------------------------------------
+# The API Gateway call can be slow (20s+ on some networks / cold Lambdas).
+# Pages must not wait for it on every click, so:
+#   * the last successful response is kept in memory and served instantly
+#   * when it is older than API_CACHE_FRESH_SECONDS a refresh runs in a
+#     background thread
+#   * a failed refresh never wipes the last good data
+#   * a refresh is also started when the app starts
+# The API itself, its URL and its response format are unchanged.
+
+API_CACHE_FRESH_SECONDS = 30
+API_FIRST_LOAD_WAIT_SECONDS = 2
+
+_api_cache = {"data": None, "fetched_at": 0.0, "refreshing": False}
+_api_cache_lock = threading.Lock()
+_api_first_response = threading.Event()
+
+
+def _refresh_api_cache():
+    try:
+        result = _fetch_expenses_from_api_now()
+
+        if result is not None:
+            with _api_cache_lock:
+                _api_cache["data"] = result
+                _api_cache["fetched_at"] = time.time()
+    finally:
+        with _api_cache_lock:
+            _api_cache["refreshing"] = False
+        _api_first_response.set()
+
+
+def _start_api_refresh_if_needed():
+    with _api_cache_lock:
+        stale = (
+            _api_cache["data"] is None
+            or time.time() - _api_cache["fetched_at"] > API_CACHE_FRESH_SECONDS
+        )
+
+        if not stale or _api_cache["refreshing"]:
+            return
+
+        _api_cache["refreshing"] = True
+
+    threading.Thread(target=_refresh_api_cache, daemon=True).start()
+
+
+def get_expenses_from_api():
+    """
+    Fetch invoice/expense records from:
+
+    API Gateway -> Lambda -> DynamoDB
+
+    Returns instantly from the in-memory copy of the last good response.
+    Returns an empty list only if no response has ever been received.
+    """
+    _start_api_refresh_if_needed()
+
+    if _api_cache["data"] is None:
+        # Very first load: give the in-flight request a short moment.
+        _api_first_response.wait(timeout=API_FIRST_LOAD_WAIT_SECONDS)
+
+    with _api_cache_lock:
+        return list(_api_cache["data"] or [])
 
 
 # ============================================================
@@ -183,14 +316,163 @@ def inject_api_config():
 # SETTINGS
 # ============================================================
 
-settings_data = {
+# Settings are stored in a small local JSON file next to app.py (the same
+# approach already used for uploaded_invoices_cache.json). This does NOT
+# touch S3 / API Gateway / Lambda / DynamoDB.
+#
+# The file is re-read on every request (and cached in flask.g for that
+# request) so that several gunicorn workers always see the latest values.
+
+DEFAULT_SETTINGS = {
 
     "name": "Ananya",
 
     "currency": "INR (₹)",
 
-    "notifications": True
+    "notifications": True,
+
+    # 0 means "no budget set"
+    "monthly_budget": 0,
+
+    # How many rows the dashboard "Recent Transactions" table shows
+    "recent_count": 5,
 }
+
+CURRENCY_SYMBOLS = {
+    "INR (₹)": "₹",
+    "USD ($)": "$",
+    "EUR (€)": "€",
+}
+
+RECENT_COUNT_CHOICES = (5, 10, 20)
+
+SETTINGS_FILE = os.path.join(
+    app.root_path,
+    "user_settings.json"
+)
+
+
+def sanitize_settings(raw):
+    """Return a complete, validated settings dict (bad values -> defaults)."""
+    raw = raw if isinstance(raw, dict) else {}
+    clean = dict(DEFAULT_SETTINGS)
+
+    name = str(raw.get("name", "") or "").strip()[:40]
+    if name:
+        clean["name"] = name
+
+    if raw.get("currency") in CURRENCY_SYMBOLS:
+        clean["currency"] = raw["currency"]
+
+    if isinstance(raw.get("notifications"), bool):
+        clean["notifications"] = raw["notifications"]
+
+    try:
+        budget = float(raw.get("monthly_budget", 0) or 0)
+        if 0 <= budget <= 1_000_000_000:
+            clean["monthly_budget"] = round(budget, 2)
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        recent_count = int(raw.get("recent_count", 5))
+        if recent_count in RECENT_COUNT_CHOICES:
+            clean["recent_count"] = recent_count
+    except (TypeError, ValueError):
+        pass
+
+    return clean
+
+
+def load_settings():
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as settings_file:
+                return sanitize_settings(json.load(settings_file))
+    except Exception as error:
+        print(f"Settings load warning: {error}")
+    return dict(DEFAULT_SETTINGS)
+
+
+def save_settings(settings):
+    """Write settings atomically. Returns True only if the file was written."""
+    temp_path = SETTINGS_FILE + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as settings_file:
+            json.dump(settings, settings_file, ensure_ascii=False, indent=2)
+        os.replace(temp_path, SETTINGS_FILE)
+        return True
+    except Exception as error:
+        print(f"Settings save error: {error}")
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        return False
+
+
+def get_settings():
+    """Settings for the current request (read from disk once per request)."""
+    if "app_settings" not in g:
+        g.app_settings = load_settings()
+    return g.app_settings
+
+
+def get_currency_symbol():
+    return CURRENCY_SYMBOLS.get(get_settings().get("currency"), "₹")
+
+
+@app.before_request
+def _start_timer():
+    g.request_started = time.time()
+
+
+@app.after_request
+def _log_request_time(response):
+    started = g.get("request_started")
+    if started and not request.path.startswith("/static"):
+        print(f"{request.method} {request.path} took {time.time() - started:.2f}s")
+    return response
+
+
+@app.context_processor
+def inject_settings():
+    """Make the saved settings available to every template."""
+    return {
+        "app_settings": get_settings(),
+        "currency_symbol": get_currency_symbol(),
+    }
+
+
+@app.template_filter("money")
+def money_filter(value, decimals=0):
+    """{{ 1234.5|money }} -> ₹1,235   |   {{ 1234.5|money(2) }} -> ₹1,234.50"""
+    try:
+        amount = _to_float(value)
+    except Exception:
+        amount = 0.0
+
+    return f"{get_currency_symbol()}{amount:,.{int(decimals)}f}"
+
+
+@app.template_filter("money_short")
+def money_short_filter(value):
+    """Compact amount for chart labels: 12400 -> ₹12.4k"""
+    try:
+        amount = _to_float(value)
+    except Exception:
+        amount = 0.0
+
+    magnitude = abs(amount)
+
+    if magnitude >= 1_000_000:
+        text = f"{amount / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    elif magnitude >= 1_000:
+        text = f"{amount / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+    else:
+        text = f"{amount:.0f}"
+
+    return f"{get_currency_symbol()}{text}"
 
 
 # ============================================================
@@ -307,6 +589,12 @@ uploaded_invoices.extend(load_uploaded_invoice_cache())
 # cache the result so Analytics/Categories can use the same data
 # without changing the 3-service AWS architecture.
 api_invoice_enrichment_cache = {}
+
+# If downloading/parsing an invoice from S3 fails, remember that for a few
+# minutes so every page load does not wait on the same failing download
+# again (this is what made pages hang on a slow/failing connection).
+api_invoice_failure_cache = {}
+ENRICHMENT_RETRY_SECONDS = 300
 
 
 def extract_invoice_text(pdf_path):
@@ -720,8 +1008,10 @@ def normalize_transaction(record):
     }
 
 
-def enrich_api_invoice(record):
+def _enrich_api_invoice_now(record):
     """
+    (Runs in a background thread - see enrich_api_invoice below.)
+
     Enrich an API/DynamoDB invoice record when the backend only has
     S3/file metadata.
 
@@ -757,6 +1047,10 @@ def enrich_api_invoice(record):
         record["total"] = existing_amount
         return record
 
+    failed_at = api_invoice_failure_cache.get(key)
+    if failed_at and time.time() - failed_at < ENRICHMENT_RETRY_SECONDS:
+        return record
+
     if key in api_invoice_enrichment_cache:
         cached = api_invoice_enrichment_cache[key]
         merged = dict(record)
@@ -782,7 +1076,7 @@ def enrich_api_invoice(record):
 
         print(f"Enriching AWS PDF from S3: {key}")
 
-        s3.download_file(
+        s3_enrichment.download_file(
             record.get("s3_bucket") or S3_BUCKET,
             key,
             temp_path,
@@ -833,6 +1127,7 @@ def enrich_api_invoice(record):
         return merged
 
     except Exception as error:
+        api_invoice_failure_cache[key] = time.time()
         print(
             f"AWS PDF enrichment skipped for {key}: {error}"
         )
@@ -844,6 +1139,69 @@ def enrich_api_invoice(record):
                 os.remove(temp_path)
             except OSError:
                 pass
+
+
+def _run_background_enrichment(record, key):
+    try:
+        _enrich_api_invoice_now(record)
+    except Exception as error:
+        api_invoice_failure_cache[key] = time.time()
+        print(f"Background enrichment error for {key}: {error}")
+    finally:
+        with _enrichment_lock:
+            api_invoice_pending.discard(key)
+
+
+def enrich_api_invoice(record):
+    """
+    Fast, non-blocking version used by every page.
+
+    Returns the record immediately. If the PDF has already been read from
+    S3, the cached amount/merchant/date/category are merged in. If not, the
+    download + local PDF parsing is started in a background thread (same
+    logic as before, in _enrich_api_invoice_now) and the result shows up
+    on the next page load.
+    """
+    record = dict(record or {})
+
+    key = record.get("s3_key") or record.get("expense_id") or ""
+    if not key.startswith("invoices/"):
+        return record
+
+    existing_amount = _to_float(
+        record.get(
+            "amount",
+            record.get("total", record.get("total_amount", 0)),
+        )
+    )
+
+    if existing_amount > 0:
+        record["amount"] = existing_amount
+        record["total"] = existing_amount
+        return record
+
+    if key in api_invoice_enrichment_cache:
+        merged = dict(record)
+        merged.update(api_invoice_enrichment_cache[key])
+        return merged
+
+    filename = record.get("invoice_name") or os.path.basename(key)
+
+    if os.path.splitext(filename)[1].lower() != ".pdf":
+        return record
+
+    failed_at = api_invoice_failure_cache.get(key)
+    if failed_at and time.time() - failed_at < ENRICHMENT_RETRY_SECONDS:
+        return record
+
+    with _enrichment_lock:
+        if key in api_invoice_pending:
+            return record
+        api_invoice_pending.add(key)
+
+    _enrichment_executor.submit(_run_background_enrichment, record, key)
+
+    return record
 
 
 def get_combined_expenses():
@@ -910,6 +1268,151 @@ def get_combined_expenses():
 
     return combined, api_expenses
 
+# ============================================================
+# MONTHLY SPENDING CALCULATION
+# ============================================================
+
+_DATE_FORMATS = [
+    "%d %B %Y",
+    "%d %b %Y",
+    "%d %B, %Y",
+    "%d %b, %Y",
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%d.%m.%Y",
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%B %d, %Y",
+    "%b %d, %Y",
+    "%B %d %Y",
+    "%b %d %Y",
+    "%d/%m/%y",
+    "%d-%m-%y",
+    "%d %b %y",
+]
+
+_NO_DATE_TEXT = {"", "not detected", "processed", "unknown", "none", "n/a"}
+
+
+def _parse_date_text(value):
+    """Parse one date string; returns None if it is missing or malformed."""
+    text = str(value or "").strip()
+
+    if text.lower() in _NO_DATE_TEXT:
+        return None
+
+    parsed = None
+
+    # ISO date/time from AWS
+    try:
+        parsed = datetime.fromisoformat(
+            text.replace("Z", "+00:00")
+        ).replace(tzinfo=None)
+    except Exception:
+        # Common invoice date formats
+        for fmt in _DATE_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except Exception:
+                continue
+
+    # Guard against nonsense dates produced by text extraction.
+    if parsed is None or not (2000 <= parsed.year <= 2100):
+        return None
+
+    return parsed
+
+
+def parse_transaction_date(transaction):
+    """
+    Best usable date for a transaction, or None.
+
+    Tries the invoice date first and falls back to the upload time, so a
+    value such as "Not detected" no longer hides a valid uploaded_at.
+    """
+    for field in ("date", "invoice_date", "uploaded_at"):
+        parsed = _parse_date_text(transaction.get(field))
+        if parsed is not None:
+            return parsed
+
+    return None
+
+
+def _shift_month(year, month, delta):
+    index = year * 12 + (month - 1) + delta
+    return index // 12, index % 12 + 1
+
+
+def calculate_monthly_series(all_transactions, months=6):
+    """
+    Spending per month for the latest `months` months, from real
+    transaction dates and amounts. This is the ONE monthly series used by
+    both the Dashboard bar chart and the Analytics line chart.
+
+    The window ends at the month of the most recent dated transaction
+    (so demo / older invoices still produce a meaningful chart). Months
+    without spending are returned with value 0.
+    """
+    dated = []
+
+    for transaction in all_transactions or []:
+        transaction_date = parse_transaction_date(transaction)
+
+        if transaction_date is None:
+            continue
+
+        dated.append((
+            transaction_date,
+            _to_float(transaction.get("amount", 0))
+        ))
+
+    anchor = (
+        max(d for d, _ in dated)
+        if dated
+        else datetime.now()
+    )
+
+    series = []
+    by_month = {}
+
+    for offset in range(months - 1, -1, -1):
+        year, month = _shift_month(anchor.year, anchor.month, -offset)
+        month_start = datetime(year, month, 1)
+
+        entry = {
+            "key": month_start.strftime("%Y-%m"),
+            "label": month_start.strftime("%b"),
+            "full_label": month_start.strftime("%b %Y"),
+            "value": 0.0,
+            "count": 0,
+        }
+
+        series.append(entry)
+        by_month[(year, month)] = entry
+
+    for transaction_date, amount in dated:
+        entry = by_month.get((transaction_date.year, transaction_date.month))
+
+        if entry is not None:
+            entry["value"] += amount
+            entry["count"] += 1
+
+    for entry in series:
+        entry["value"] = round(entry["value"], 2)
+
+    return series
+
+
+def calculate_monthly_spending(all_transactions):
+    """Backward-compatible (labels, values) view of the monthly series."""
+    series = calculate_monthly_series(all_transactions)
+
+    return (
+        [entry["label"] for entry in series],
+        [entry["value"] for entry in series],
+    )
+
 
 def calculate_category_totals(all_transactions):
     totals = {}
@@ -923,6 +1426,288 @@ def calculate_category_totals(all_transactions):
 
 
 # ============================================================
+# SPENDING SUMMARY  (single source of truth for charts/analytics)
+# ============================================================
+
+CHART_COLORS = [
+    "#6257e8", "#8278ee", "#4ec8b0", "#f2b34d",
+    "#e9788a", "#4785df", "#d6d2fa", "#9aa0b2",
+]
+
+_UNKNOWN_MERCHANTS = {
+    "", "not detected", "aws invoice", "unknown", "processed",
+}
+
+
+def build_line_chart(series, width=600, height=240):
+    """
+    Pre-computed SVG geometry for the Analytics line chart, derived from the
+    same monthly series the Dashboard bar chart uses.
+    """
+    left, right, top, bottom = 52, 18, 18, 34
+
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    baseline = top + plot_h
+
+    max_value = max((entry["value"] for entry in series), default=0)
+    count = len(series)
+
+    points = []
+
+    for index, entry in enumerate(series):
+        x = left + (plot_w * index / (count - 1) if count > 1 else plot_w / 2)
+        y = baseline - (
+            plot_h * entry["value"] / max_value if max_value > 0 else 0
+        )
+
+        points.append({
+            "x": round(x, 1),
+            "y": round(y, 1),
+            "label": entry["label"],
+            "full_label": entry["full_label"],
+            "value": entry["value"],
+        })
+
+    if points:
+        line = " ".join(f"{p['x']},{p['y']}" for p in points)
+        area = (
+            f"M{points[0]['x']},{baseline} "
+            + " ".join(f"L{p['x']},{p['y']}" for p in points)
+            + f" L{points[-1]['x']},{baseline} Z"
+        )
+    else:
+        line = ""
+        area = ""
+
+    ticks = [
+        {
+            "y": round(baseline - plot_h * fraction, 1),
+            "value": max_value * fraction,
+        }
+        for fraction in ((0, 0.5, 1) if max_value > 0 else (0,))
+    ]
+
+    return {
+        "width": width,
+        "height": height,
+        "left": left,
+        "right": width - right,
+        "baseline": baseline,
+        "points": points,
+        "line": line,
+        "area": area,
+        "ticks": ticks,
+        "has_data": max_value > 0,
+    }
+
+
+def build_spending_summary(all_transactions, settings=None, recent_limit=5):
+    """
+    Every number shown on the Dashboard and Analytics pages is computed here,
+    once, from the combined transaction list (the same list the rest of the
+    app already uses). Nothing in this function is hard-coded or random, and
+    nothing is invented: a metric that cannot be computed is None / empty.
+    """
+    settings = settings or DEFAULT_SETTINGS
+    transactions_list = list(all_transactions or [])
+
+    # ---------------- totals ----------------
+    amounts = [_to_float(t.get("amount", 0)) for t in transactions_list]
+    total = sum(amounts)
+    count = len(transactions_list)
+
+    priced = [
+        (t, a) for t, a in zip(transactions_list, amounts) if a > 0
+    ]
+    unpriced_count = count - len(priced)
+
+    average = (
+        sum(a for _, a in priced) / len(priced) if priced else 0.0
+    )
+
+    highest = None
+    if priced:
+        top_t, top_a = max(priced, key=lambda pair: pair[1])
+        highest = {
+            "merchant": top_t.get("merchant") or "Unknown",
+            "category": top_t.get("category") or "Other",
+            "date": top_t.get("date") or "",
+            "amount": top_a,
+        }
+
+    # ---------------- months ----------------
+    monthly = calculate_monthly_series(transactions_list)
+    month_keys = {entry["key"] for entry in monthly}
+
+    dated_count = 0
+    outside_window_count = 0
+
+    for t in transactions_list:
+        parsed = parse_transaction_date(t)
+
+        if parsed is None:
+            continue
+
+        dated_count += 1
+
+        if parsed.strftime("%Y-%m") not in month_keys:
+            outside_window_count += 1
+
+    undated_count = count - dated_count
+
+    active_months = [m for m in monthly if m["value"] > 0]
+    average_monthly = (
+        sum(m["value"] for m in active_months) / len(active_months)
+        if active_months else 0.0
+    )
+
+    latest_month = monthly[-1] if monthly else None
+    previous_month = monthly[-2] if len(monthly) > 1 else None
+
+    mom_change = None
+    if (
+        latest_month
+        and previous_month
+        and previous_month["value"] > 0
+    ):
+        mom_change = (
+            (latest_month["value"] - previous_month["value"])
+            / previous_month["value"] * 100
+        )
+
+    peak_month = (
+        max(monthly, key=lambda m: m["value"]) if active_months else None
+    )
+
+    max_month_value = max((m["value"] for m in monthly), default=0)
+
+    # ---------------- categories ----------------
+    category_totals = calculate_category_totals(transactions_list)
+
+    category_rows = []
+
+    for index, (name, value) in enumerate(
+        sorted(category_totals.items(), key=lambda kv: kv[1], reverse=True)
+    ):
+        category_rows.append({
+            "name": name,
+            "value": value,
+            "pct": (value / total * 100) if total > 0 else 0.0,
+            "color": CHART_COLORS[index % len(CHART_COLORS)],
+        })
+
+    top_category = (
+        category_rows[0] if category_rows and category_rows[0]["value"] > 0
+        else None
+    )
+
+    # conic-gradient for the dashboard donut (real percentages)
+    stops = []
+    cursor = 0.0
+    visible = [row for row in category_rows if row["value"] > 0]
+
+    for position, row in enumerate(visible):
+        end = (
+            100.0 if position == len(visible) - 1
+            else cursor + row["pct"]
+        )
+        stops.append(f"{row['color']} {cursor:.2f}% {end:.2f}%")
+        cursor = end
+
+    donut_gradient = (
+        ", ".join(stops) if stops else "#eceef5 0% 100%"
+    )
+
+    # ---------------- merchants ----------------
+    merchant_totals = {}
+
+    for t, amount in zip(transactions_list, amounts):
+        name = str(t.get("merchant") or "").strip()
+        lowered = name.lower()
+
+        if (
+            lowered in _UNKNOWN_MERCHANTS
+            or lowered.endswith((".pdf", ".png", ".jpg", ".jpeg"))
+            or amount <= 0
+        ):
+            continue
+
+        entry = merchant_totals.setdefault(
+            lowered, {"name": name, "value": 0.0, "count": 0}
+        )
+        entry["value"] += amount
+        entry["count"] += 1
+
+    top_merchants = sorted(
+        merchant_totals.values(),
+        key=lambda m: m["value"],
+        reverse=True,
+    )[:5]
+
+    for merchant in top_merchants:
+        merchant["pct"] = (
+            merchant["value"] / total * 100 if total > 0 else 0.0
+        )
+
+    # ---------------- recent ----------------
+    recent = sorted(
+        transactions_list,
+        key=lambda t: parse_transaction_date(t) or datetime.min,
+        reverse=True,
+    )[:max(int(recent_limit or 5), 1)]
+
+    # ---------------- budget ----------------
+    budget = None
+    monthly_budget = _to_float(settings.get("monthly_budget", 0))
+
+    if monthly_budget > 0 and latest_month:
+        spent = latest_month["value"]
+        pct = spent / monthly_budget * 100
+
+        budget = {
+            "limit": monthly_budget,
+            "spent": spent,
+            "remaining": monthly_budget - spent,
+            "pct": pct,
+            "bar_pct": min(pct, 100),
+            "month": latest_month["full_label"],
+            "state": (
+                "over" if pct >= 100
+                else "warn" if pct >= 80
+                else "ok"
+            ),
+        }
+
+    return {
+        "total": total,
+        "count": count,
+        "priced_count": len(priced),
+        "unpriced_count": unpriced_count,
+        "average": average,
+        "highest": highest,
+        "monthly": monthly,
+        "max_month_value": max_month_value,
+        "line_chart": build_line_chart(monthly),
+        "dated_count": dated_count,
+        "undated_count": undated_count,
+        "outside_window_count": outside_window_count,
+        "average_monthly": average_monthly,
+        "active_month_count": len(active_months),
+        "latest_month": latest_month,
+        "previous_month": previous_month,
+        "mom_change": mom_change,
+        "peak_month": peak_month,
+        "categories": category_rows,
+        "top_category": top_category,
+        "donut_gradient": donut_gradient,
+        "top_merchants": top_merchants,
+        "recent": recent,
+        "budget": budget,
+    }
+
+
+# ============================================================
 # DASHBOARD
 # ============================================================
 
@@ -930,88 +1715,23 @@ def calculate_category_totals(all_transactions):
 def dashboard():
     all_transactions, aws_expenses = get_combined_expenses()
 
-    # --------------------------------------------------------
-    # TOTAL SPENDING
-    # --------------------------------------------------------
-    total = sum(
-        _to_float(t.get("amount", 0))
-        for t in all_transactions
-    )
+    settings = get_settings()
 
-    # --------------------------------------------------------
-    # CATEGORY TOTALS
-    # --------------------------------------------------------
-    categories = calculate_category_totals(all_transactions)
-
-    # --------------------------------------------------------
-    # TRANSACTION COUNT
-    # --------------------------------------------------------
-    transaction_count = len(all_transactions)
-
-    # --------------------------------------------------------
-    # RECENT TRANSACTIONS
-    #
-    # The old code used all_transactions[:5].
-    # Since demo transactions are stored first, that caused
-    # the dashboard to always show The Urban Cafe, Swiggy, etc.
-    #
-    # We now sort by the invoice date/upload date so that newly
-    # uploaded invoices appear at the top.
-    # --------------------------------------------------------
-
-    def transaction_sort_key(transaction):
-        date_value = (
-            transaction.get("date")
-            or transaction.get("uploaded_at")
-            or ""
-        )
-
-        if not date_value:
-            return datetime.min
-
-        date_text = str(date_value).strip()
-
-        # ISO date/time from AWS
-        try:
-            return datetime.fromisoformat(
-                date_text.replace("Z", "+00:00")
-            ).replace(tzinfo=None)
-        except Exception:
-            pass
-
-        # Demo dates such as "21 Sep 2026"
-        for fmt in [
-            "%d %b %Y",
-            "%d %B %Y",
-            "%Y-%m-%d"
-        ]:
-            try:
-                return datetime.strptime(
-                    date_text,
-                    fmt
-                )
-            except Exception:
-                pass
-
-        return datetime.min
-
-    recent_transactions = sorted(
+    # One summary feeds every number and chart on this page.
+    summary = build_spending_summary(
         all_transactions,
-        key=transaction_sort_key,
-        reverse=True
-    )[:5]
-
-    # --------------------------------------------------------
-    # DASHBOARD
-    # --------------------------------------------------------
+        settings,
+        recent_limit=settings["recent_count"],
+    )
 
     return render_template(
         "dashboard.html",
-        transactions=recent_transactions,
-        total=total,
-        categories=categories,
-        invoice_count=transaction_count,
-        transaction_count=transaction_count,
+        summary=summary,
+        transactions=summary["recent"],
+        total=summary["total"],
+        categories=calculate_category_totals(all_transactions),
+        invoice_count=summary["count"],
+        transaction_count=summary["count"],
         aws_expenses=aws_expenses,
         api_url=API_URL
     )
@@ -1343,15 +2063,20 @@ def analytics():
 
     categories = calculate_category_totals(all_transactions)
 
-    total = sum(
-        _to_float(t.get("amount", 0))
-        for t in all_transactions
+    # Same summary builder as the Dashboard -> same numbers, same chart data.
+    summary = build_spending_summary(
+        all_transactions,
+        get_settings(),
+        recent_limit=8,
     )
 
-    transaction_count = len(all_transactions)
+    total = summary["total"]
+
+    transaction_count = summary["count"]
 
     return render_template(
         "analytics.html",
+        summary=summary,
         transactions=all_transactions,
         categories=categories,
         total=total,
@@ -1384,42 +2109,56 @@ def settings():
 
     if request.method == "POST":
 
-        settings_data["name"] = (
+        # "Reset to defaults" button
+        if request.form.get("action") == "reset":
 
-            request.form.get(
-                "name",
-                "Ananya"
-            ).strip()
+            if save_settings(dict(DEFAULT_SETTINGS)):
+                flash("Settings were reset to their defaults.")
+            else:
+                flash("Could not reset settings (file could not be written).")
 
-            or "Ananya"
+            return redirect(url_for("settings"))
 
-        )
+        # Validate the budget first: never silently ignore bad input.
+        budget_text = (
+            request.form.get("monthly_budget", "") or ""
+        ).strip().replace(",", "")
 
-        settings_data["currency"] = (
-            request.form.get(
-                "currency",
-                "INR (₹)"
+        try:
+            budget_value = float(budget_text) if budget_text else 0.0
+            if not 0 <= budget_value <= 1_000_000_000:
+                raise ValueError("out of range")
+        except ValueError:
+            flash(
+                "Monthly budget must be a number of 0 or more. "
+                "Nothing was saved."
             )
-        )
+            return redirect(url_for("settings"))
 
-        settings_data["notifications"] = (
-            request.form.get(
-                "notifications"
-            ) == "on"
-        )
+        new_settings = sanitize_settings({
+            "name": request.form.get("name", ""),
+            "currency": request.form.get("currency", ""),
+            "notifications": request.form.get("notifications") == "on",
+            "monthly_budget": budget_value,
+            "recent_count": request.form.get("recent_count", 5),
+        })
 
-        flash(
-            "Settings saved successfully."
-        )
+        if save_settings(new_settings):
+            flash("Settings saved successfully.")
+        else:
+            flash(
+                "Settings could not be saved because the settings "
+                "file is not writable on this server."
+            )
 
-        return redirect(
-            url_for("settings")
-        )
+        return redirect(url_for("settings"))
 
     return render_template(
         "settings.html",
 
-        settings=settings_data
+        settings=get_settings(),
+
+        recent_count_choices=RECENT_COUNT_CHOICES
     )
 
 
@@ -1514,6 +2253,11 @@ def health():
 # ============================================================
 # START APPLICATION
 # ============================================================
+
+# Start loading the AWS records as soon as the app starts so the first
+# page the user opens is usually already served from memory.
+_start_api_refresh_if_needed()
+
 
 if __name__ == "__main__":
 

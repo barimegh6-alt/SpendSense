@@ -3,7 +3,7 @@
 {% block content %}
 <section class="page-head">
   <div>
-    <h1>Good morning, Ananya! 👋</h1>
+    <h1>Welcome back, {{ app_settings.name }}! 👋</h1>
     <p>Here's your expense overview.</p>
   </div>
   <a class="btn primary" href="{{ url_for('upload_invoice') }}">+ Upload Invoice</a>
@@ -11,10 +11,10 @@
 
 <section class="cards">
   <div class="stat-card">
-    <div class="stat-icon green">₹</div>
+    <div class="stat-icon green">{{ currency_symbol }}</div>
     <div>
       <span>Total Expenses</span>
-      <strong>₹{{ "{:,.0f}".format(total) }}</strong>
+      <strong>{{ total|money }}</strong>
       <small>Current SpendSense data</small>
     </div>
   </div>
@@ -29,11 +29,11 @@
   </div>
 
   <div class="stat-card">
-    <div class="stat-icon orange">₹</div>
+    <div class="stat-icon orange">{{ currency_symbol }}</div>
     <div>
       <span>Avg. Transaction</span>
-      <strong>₹{{ "{:,.0f}".format(total / invoice_count) if invoice_count else 0 }}</strong>
-      <small>Based on current expenses</small>
+      <strong>{{ summary.average|money }}</strong>
+      <small>{% if summary.unpriced_count %}Excludes {{ summary.unpriced_count }} invoice(s) with no detected amount{% else %}Based on current expenses{% endif %}</small>
     </div>
   </div>
 
@@ -47,22 +47,58 @@
   </div>
 </section>
 
+{% if summary.budget %}
+<section class="panel budget-panel budget-{{ summary.budget.state }}" style="margin:0 32px 18px;">
+  <div class="panel-title">
+    <h2>Monthly Budget · {{ summary.budget.month }}</h2>
+    <a href="{{ url_for('settings') }}">Edit budget →</a>
+  </div>
+  <div class="meter"><div class="meter-fill" style="width:{{ '%.1f'|format(summary.budget.bar_pct) }}%"></div></div>
+  <p class="budget-line">
+    <strong>{{ summary.budget.spent|money }}</strong> of {{ summary.budget.limit|money }} spent
+    ({{ '%.0f'|format(summary.budget.pct) }}%)
+    {% if summary.budget.remaining >= 0 %}· {{ summary.budget.remaining|money }} left{% else %}· {{ (-summary.budget.remaining)|money }} over budget{% endif %}
+  </p>
+  {% if app_settings.notifications and summary.budget.state != 'ok' %}
+  <div class="budget-alert">
+    {% if summary.budget.state == 'over' %}⚠ You have exceeded your monthly budget.{% else %}⚠ You have used {{ '%.0f'|format(summary.budget.pct) }}% of your monthly budget.{% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="grid-2">
   <div class="panel">
-    <div class="panel-title"><h2>Monthly Spending</h2><span class="select">This Month ▾</span></div>
+    <div class="panel-title"><h2>Monthly Spending</h2><span class="select">Last 6 months</span></div>
     <div class="bar-chart">
-      {% for label, value in [('Jan',12400),('Feb',15200),('Mar',13800),('Apr',17600),('May',15100),('Jun',18450)] %}
-      <div class="bar-col"><div class="bar" style="height:{{ (value/18450*150)|int }}px"></div><span>{{ label }}</span></div>
+      {% for m in summary.monthly %}
+      <div class="bar-col" title="{{ m.full_label }}: {{ m.value|money(2) }} ({{ m.count }} invoice{{ '' if m.count == 1 else 's' }})">
+        {% set bar_px = ((m.value / summary.max_month_value * 120)|int) if summary.max_month_value > 0 else 0 %}
+        {% if m.value > 0 and bar_px < 3 %}{% set bar_px = 3 %}{% endif %}
+        <em class="bar-val">{{ m.value|money_short }}</em>
+        <div class="bar" style="height:{{ bar_px }}px"></div>
+        <span>{{ m.label }}</span>
+      </div>
       {% endfor %}
     </div>
+    {% if not summary.max_month_value %}
+    <p class="chart-note">No dated spending yet. Upload an invoice to see monthly totals.</p>
+    {% elif summary.undated_count or summary.outside_window_count %}
+    <p class="chart-note">
+      {% if summary.undated_count %}{{ summary.undated_count }} invoice(s) have no readable date and are not in this chart. {% endif %}
+      {% if summary.outside_window_count %}{{ summary.outside_window_count }} older invoice(s) fall outside these 6 months.{% endif %}
+    </p>
+    {% endif %}
   </div>
   <div class="panel">
     <div class="panel-title"><h2>Spending by Category</h2></div>
     <div class="donut-wrap">
-      <div class="donut"><div class="donut-hole"><strong>₹{{ "{:,.0f}".format(total) }}</strong><span>Total</span></div></div>
+      <div class="donut" style="background:conic-gradient({{ summary.donut_gradient }})"><div class="donut-hole"><strong>{{ total|money }}</strong><span>Total</span></div></div>
       <div class="legend">
-        {% for cat, value in categories.items() %}
-        <div><i></i><span>{{ cat }}</span><b>{{ "{:.0f}".format(value/total*100) }}%</b></div>
+        {% for row in summary.categories %}
+        <div><i style="background:{{ row.color }}"></i><span>{{ row.name }}</span><b>{{ '%.0f'|format(row.pct) }}%</b></div>
+        {% else %}
+        <div><span>No category data yet</span></div>
         {% endfor %}
       </div>
     </div>
@@ -101,7 +137,7 @@
     <thead><tr><th>Merchant</th><th>Category</th><th>Amount</th><th>Date</th><th>Status</th></tr></thead>
     <tbody>
       {% for t in transactions %}
-      <tr><td class="merchant">{{ t.merchant }}</td><td>{{ t.category }}</td><td>₹{{ "{:,.2f}".format(t.amount) }}</td><td>{{ t.date }}</td><td><span class="status">● {{ t.status }}</span></td></tr>
+      <tr><td class="merchant">{{ t.merchant }}</td><td>{{ t.category }}</td><td>{{ t.amount|money(2) }}</td><td>{{ t.date }}</td><td><span class="status">● {{ t.status }}</span></td></tr>
       {% endfor %}
     </tbody>
   </table>

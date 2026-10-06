@@ -10,7 +10,7 @@
         <p>Understand where your money is going.</p>
     </div>
 
-    <span class="select">Last 6 Months ▾</span>
+    <span class="select">Last 6 months</span>
 </section>
 
 
@@ -44,26 +44,93 @@
 </div>
 
 
-<!-- ANALYTICS -->
-<div class="grid-2">
+<!-- KEY NUMBERS -->
+<section class="cards" style="padding-left:0;padding-right:0;">
+    <div class="stat-card">
+        <div class="stat-icon green">{{ currency_symbol }}</div>
+        <div>
+            <span>Total Spending</span>
+            <strong>{{ summary.total|money }}</strong>
+            <small>{{ summary.count }} invoice{{ '' if summary.count == 1 else 's' }}/transactions</small>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-icon purple">Ø</div>
+        <div>
+            <span>Average Transaction</span>
+            <strong>{{ summary.average|money }}</strong>
+            <small>
+                {% if summary.unpriced_count %}Excludes {{ summary.unpriced_count }} with no detected amount{% else %}Across {{ summary.priced_count }} priced invoice(s){% endif %}
+            </small>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-icon orange">▲</div>
+        <div>
+            <span>Largest Single Expense</span>
+            <strong>{{ summary.highest.amount|money if summary.highest else '—' }}</strong>
+            <small>{% if summary.highest %}{{ summary.highest.merchant }}{% else %}No amounts detected yet{% endif %}</small>
+        </div>
+    </div>
+
+    <div class="stat-card">
+        <div class="stat-icon blue">◔</div>
+        <div>
+            <span>Avg. Monthly Spending</span>
+            <strong>{{ summary.average_monthly|money }}</strong>
+            <small>
+                {% if summary.active_month_count %}Over {{ summary.active_month_count }} month{{ '' if summary.active_month_count == 1 else 's' }} with spending{% else %}No dated spending yet{% endif %}
+            </small>
+        </div>
+    </div>
+</section>
+
+
+<!-- CHARTS -->
+<div class="grid-2" style="padding-left:0;padding-right:0;">
 
     <div class="panel">
         <div class="panel-title">
             <h2>Monthly Expenses</h2>
+            {% if summary.mom_change is not none %}
+                <span class="select {{ 'down' if summary.mom_change > 0 else 'up' }}">
+                    {{ '▲' if summary.mom_change > 0 else '▼' if summary.mom_change < 0 else '＝' }}
+                    {{ '%.1f'|format(summary.mom_change|abs) }}% vs {{ summary.previous_month.label }}
+                </span>
+            {% endif %}
         </div>
 
-        <div class="line-chart">
-            <div class="line"></div>
+        {% set lc = summary.line_chart %}
+        <svg class="chart-svg" viewBox="0 0 {{ lc.width }} {{ lc.height }}" role="img"
+             aria-label="Monthly expenses for the last 6 months">
+            {% for tick in lc.ticks %}
+            <line x1="{{ lc.left }}" x2="{{ lc.right }}" y1="{{ tick.y }}" y2="{{ tick.y }}" class="chart-grid"/>
+            <text x="{{ lc.left - 8 }}" y="{{ tick.y + 4 }}" text-anchor="end" class="chart-axis">{{ tick.value|money_short }}</text>
+            {% endfor %}
 
-            <div class="chart-labels">
-                <span>Jan</span>
-                <span>Feb</span>
-                <span>Mar</span>
-                <span>Apr</span>
-                <span>May</span>
-                <span>Jun</span>
-            </div>
-        </div>
+            {% if lc.has_data %}
+            <path d="{{ lc.area }}" class="chart-area"/>
+            <polyline points="{{ lc.line }}" class="chart-line"/>
+            {% endif %}
+
+            {% for p in lc.points %}
+            <circle cx="{{ p.x }}" cy="{{ p.y }}" r="4" class="chart-dot">
+                <title>{{ p.full_label }}: {{ p.value|money(2) }}</title>
+            </circle>
+            <text x="{{ p.x }}" y="{{ lc.baseline + 20 }}" text-anchor="middle" class="chart-axis">{{ p.label }}</text>
+            {% endfor %}
+        </svg>
+
+        {% if not lc.has_data %}
+        <p class="chart-note">No dated spending yet. Upload an invoice to see monthly totals.</p>
+        {% elif summary.undated_count or summary.outside_window_count %}
+        <p class="chart-note">
+            {% if summary.undated_count %}{{ summary.undated_count }} invoice(s) have no readable date and are not in this chart. {% endif %}
+            {% if summary.outside_window_count %}{{ summary.outside_window_count }} older invoice(s) fall outside these 6 months.{% endif %}
+        </p>
+        {% endif %}
     </div>
 
 
@@ -74,16 +141,16 @@
 
         <div class="category-list">
 
-            {% if categories %}
+            {% if summary.categories %}
 
-                {% for cat, value in categories.items() %}
+                {% for row in summary.categories %}
 
-                <div>
-                    <span>{{ cat }}</span>
-
-                    <b>
-                        ₹{{ "{:,.0f}".format(value) }}
-                    </b>
+                <div class="cat-row">
+                    <div class="cat-row-top">
+                        <span><i class="cat-dot" style="background:{{ row.color }}"></i>{{ row.name }}</span>
+                        <b>{{ row.value|money }} · {{ '%.0f'|format(row.pct) }}%</b>
+                    </div>
+                    <div class="meter small"><div class="meter-fill" style="width:{{ '%.1f'|format(row.pct) }}%;background:{{ row.color }}"></div></div>
                 </div>
 
                 {% endfor %}
@@ -92,7 +159,7 @@
 
                 <div>
                     <span>No category data available</span>
-                    <b>₹0</b>
+                    <b>{{ 0|money }}</b>
                 </div>
 
             {% endif %}
@@ -103,18 +170,100 @@
 </div>
 
 
+<div class="grid-2" style="padding-left:0;padding-right:0;">
+
+    <div class="panel">
+        <div class="panel-title">
+            <h2>Top Merchants</h2>
+        </div>
+
+        <div class="category-list">
+            {% for m in summary.top_merchants %}
+            <div class="cat-row">
+                <div class="cat-row-top">
+                    <span>{{ loop.index }}. {{ m.name }} <small class="muted">({{ m.count }} invoice{{ '' if m.count == 1 else 's' }})</small></span>
+                    <b>{{ m.value|money }} · {{ '%.0f'|format(m.pct) }}%</b>
+                </div>
+                <div class="meter small"><div class="meter-fill" style="width:{{ '%.1f'|format(m.pct) }}%"></div></div>
+            </div>
+            {% else %}
+            <div>
+                <span>No merchant data with a detected amount yet</span>
+                <b>—</b>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+
+    <div class="panel">
+        <div class="panel-title">
+            <h2>Month Summary</h2>
+        </div>
+
+        <div class="category-list">
+            <div>
+                <span>Latest month ({{ summary.latest_month.full_label }})</span>
+                <b>{{ summary.latest_month.value|money }}</b>
+            </div>
+            <div>
+                <span>Previous month ({{ summary.previous_month.full_label }})</span>
+                <b>{{ summary.previous_month.value|money }}</b>
+            </div>
+            <div>
+                <span>Month-over-month change</span>
+                <b>
+                    {% if summary.mom_change is none %}Not available{% else %}{{ '+' if summary.mom_change > 0 else '' }}{{ '%.1f'|format(summary.mom_change) }}%{% endif %}
+                </b>
+            </div>
+            <div>
+                <span>Highest-spending month</span>
+                <b>{% if summary.peak_month %}{{ summary.peak_month.full_label }} · {{ summary.peak_month.value|money }}{% else %}—{% endif %}</b>
+            </div>
+            <div>
+                <span>Top category</span>
+                <b>{% if summary.top_category %}{{ summary.top_category.name }} · {{ '%.0f'|format(summary.top_category.pct) }}%{% else %}—{% endif %}</b>
+            </div>
+            {% if summary.budget %}
+            <div>
+                <span>Budget used ({{ summary.budget.month }})</span>
+                <b>{{ '%.0f'|format(summary.budget.pct) }}% of {{ summary.budget.limit|money }}</b>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+</div>
+
+
 <!-- SPENDING INSIGHTS -->
-<div class="panel insights">
+<div class="panel insights" style="margin-left:0;margin-right:0;">
 
     <h2>Spending Insights</h2>
 
+    {% if summary.mom_change is not none %}
     <div class="insight">
-        📈 Your spending increased by 12.4% compared to last month.
+        {{ '📈' if summary.mom_change > 0 else '📉' }}
+        Your spending in {{ summary.latest_month.full_label }}
+        {% if summary.mom_change > 0 %}increased{% elif summary.mom_change < 0 %}decreased{% else %}did not change{% endif %}
+        {% if summary.mom_change != 0 %}by <strong>{{ '%.1f'|format(summary.mom_change|abs) }}%</strong>{% endif %}
+        compared to {{ summary.previous_month.full_label }}.
     </div>
+    {% endif %}
 
+    {% if summary.top_category %}
     <div class="insight">
-        🍔 Food & Dining is your largest expense category.
+        🏷️ <strong>{{ summary.top_category.name }}</strong> is your largest expense category
+        ({{ summary.top_category.value|money }}, {{ '%.0f'|format(summary.top_category.pct) }}% of spending).
     </div>
+    {% endif %}
+
+    {% if summary.highest %}
+    <div class="insight">
+        💳 Your largest single expense is <strong>{{ summary.highest.amount|money(2) }}</strong>
+        at {{ summary.highest.merchant }}{% if summary.highest.date %} ({{ summary.highest.date }}){% endif %}.
+    </div>
+    {% endif %}
 
     <div class="insight">
         🧾 You have processed
@@ -128,6 +277,39 @@
         processed invoice record(s).
     </div>
 
+    {% if summary.unpriced_count %}
+    <div class="insight">
+        ℹ️ {{ summary.unpriced_count }} invoice(s) have no detected amount (for example scanned images),
+        so they are left out of averages and charts.
+    </div>
+    {% endif %}
+
+</div>
+
+
+<!-- RECENT TRANSACTIONS -->
+<div class="panel" style="margin-top:16px;">
+    <div class="panel-title">
+        <h2>Recent Transactions</h2>
+        <a href="{{ url_for('invoices') }}">View all →</a>
+    </div>
+    <div class="table-wrap" style="margin:0;">
+        <table>
+            <thead><tr><th>Merchant</th><th>Category</th><th>Amount</th><th>Date</th></tr></thead>
+            <tbody>
+                {% for t in summary.recent %}
+                <tr>
+                    <td class="merchant">{{ t.merchant }}</td>
+                    <td>{{ t.category }}</td>
+                    <td>{{ t.amount|money(2) }}</td>
+                    <td>{{ t.date }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4">No transactions yet.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
 
 {% endblock %}

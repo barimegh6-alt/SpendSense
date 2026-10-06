@@ -4,11 +4,11 @@
 <section class="page-head"><div><h1>Settings</h1><p>Manage your SpendSense preferences.</p></div></section>
 <form class="panel settings-panel" method="post" action="/settings">
   <div class="setting-row">
-    <div><strong>Profile name</strong><span>Shown in your dashboard greeting.</span></div>
-    <input class="settings-input" name="name" value="{{ settings.name }}" required>
+    <div><strong>Profile name</strong><span>Shown in your dashboard greeting and the top bar.</span></div>
+    <input class="settings-input" name="name" value="{{ settings.name }}" maxlength="40" required>
   </div>
   <div class="setting-row">
-    <div><strong>Currency</strong><span>Currency used for expense totals.</span></div>
+    <div><strong>Currency</strong><span>Symbol used for every amount. Amounts are not converted.</span></div>
     <select class="settings-input" name="currency">
       <option {% if settings.currency == "INR (₹)" %}selected{% endif %}>INR (₹)</option>
       <option {% if settings.currency == "USD ($)" %}selected{% endif %}>USD ($)</option>
@@ -16,9 +16,27 @@
     </select>
   </div>
   <div class="setting-row">
-    <div><strong>Expense notifications</strong><span>Receive processing and insight notifications.</span></div>
+    <div><strong>Monthly spending budget</strong><span>Shows a progress bar on the dashboard. Leave empty or 0 for no budget.</span></div>
+    <input class="settings-input" type="number" name="monthly_budget" min="0" step="1" inputmode="decimal"
+           placeholder="e.g. 20000" value="{{ '%g'|format(settings.monthly_budget) if settings.monthly_budget else '' }}">
+  </div>
+  <div class="setting-row">
+    <div><strong>Budget alerts</strong><span>Show a warning on the dashboard at 80% and 100% of your monthly budget.</span></div>
     <label class="switch"><input type="checkbox" name="notifications" {% if settings.notifications %}checked{% endif %}><span></span></label>
   </div>
-  <div class="save-row"><button class="btn primary" type="submit">Save Changes</button></div>
+  <div class="setting-row">
+    <div><strong>Recent transactions shown</strong><span>Number of rows in the dashboard's Recent Transactions table.</span></div>
+    <select class="settings-input" name="recent_count">
+      {% for n in recent_count_choices %}
+      <option value="{{ n }}" {% if settings.recent_count == n %}selected{% endif %}>{{ n }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="save-row">
+    <button class="btn ghost" type="submit" name="action" value="reset"
+            onclick="return confirm('Reset all settings to their defaults?');">Reset to defaults</button>
+    <button class="btn primary" type="submit" name="action" value="save">Save Changes</button>
+  </div>
+  <p class="settings-note">Settings are saved on the server running SpendSense and apply to everyone using this copy of the app.</p>
 </form>
 {% endblock %}
